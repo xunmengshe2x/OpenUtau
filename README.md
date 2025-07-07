@@ -81,6 +81,18 @@ See the [Getting-Started Wiki page](https://github.com/stakira/OpenUtau/wiki/Get
   - Compatible with most UTAU resamplers.
 - Runs on Windows (32/64 bit), macOS, and Linux.
 
+## Command-line phonemizer tool
+
+A minimal console application is provided to run the Enunu English phonemizer on a USTX project and output phoneme timing data as JSON:
+
+```bash
+dotnet run --project OpenUtau.Cli -- <project.ustx> <singer-id> [output.json]
+```
+
+This command loads the specified USTX file, applies the Enunu English phonemizer for the given singer ID, and prints or writes the phoneme timings in milliseconds.
+
+If you place your singer’s voicebank folder (named exactly as the singer ID) alongside the USTX file, the CLI will automatically detect and use it without further configuration.
+
 ### What it doesn't do
 - While OpenUtau can do very minimal mixing, it will not replace your digital audio workstation of choice.
 - OpenUtau does not aim for Vocaloid compatibility, except for some limited features.

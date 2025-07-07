@@ -5,7 +5,7 @@ using OpenUtau.Core.Ustx;
 
 namespace OpenUtau.Classic {
     public static class ClassicSingerLoader {
-        static USinger AdjustSingerType(Voicebank v) {
+        public static USinger AdjustSingerType(Voicebank v) {
             switch (v.SingerType) {
                 case USingerType.Enunu:
                     return new Core.Enunu.EnunuSinger(v) as USinger;
