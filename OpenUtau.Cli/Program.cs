@@ -169,6 +169,9 @@ namespace OpenUtau.Cli {
                     for (int j = 0; j < res.phonemes.Length; j++) {
                         res.phonemes[j].position += grp[0].position;
                     }
+                    // DEBUG: show mapped & positioned phonemes for this group
+                    Console.Error.WriteLine($"[DEBUG] Group {i} mapped phonemes: {string.Join(' ', res.phonemes.Select(p => p.phoneme))}");
+                    Console.Error.WriteLine($"[DEBUG] Group {i} phoneme tick positions: {string.Join(' ', res.phonemes.Select(p => p.position.ToString()))}");
                     phonemeResults.Insert(0, res.phonemes);
                 }
                 phonemizer.CleanUp();
@@ -180,6 +183,8 @@ namespace OpenUtau.Cli {
                     for (int pi = 0; pi < phonemeResults[gi].Length; pi++) {
                         var ph = phonemeResults[gi][pi];
                         var ms = timeAxis.TickPosToMsPos(ph.position);
+                        // DEBUG: phoneme timing for output
+                        Console.Error.WriteLine($"[DEBUG] Group {gi}, phoneme #{pi}: '{ph.phoneme}' at tick {ph.position} (~{ms} ms)");
                         results.Add(new PhonemeTiming {
                             PartName = part.DisplayName,
                             NoteIndex = noteIndexCounter,
