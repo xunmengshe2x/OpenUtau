@@ -93,6 +93,8 @@ This command loads the specified USTX file, applies the Enunu English phonemizer
 
 If you place your singer’s voicebank folder (named exactly as the singer ID) alongside the USTX file, the CLI will automatically detect and use it without further configuration.
 
+- For Enunu ONNX English (ENUNU X EN), the CLI will look for `enunux.yaml` in either the voicebank root or an `enunux/` subfolder (to match common voicebank layouts).
+
 ### What it doesn't do
 - While OpenUtau can do very minimal mixing, it will not replace your digital audio workstation of choice.
 - OpenUtau does not aim for Vocaloid compatibility, except for some limited features.
