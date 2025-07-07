@@ -74,6 +74,7 @@ namespace OpenUtau.Cli {
                 Console.Error.WriteLine($"Error: singer '{singerId}' not found.");
                 return 1;
             }
+            Console.Error.WriteLine($"[DEBUG] Singer loaded: Id='{singer.Id}', Name='{singer.Name}', Type='{singer.SingerType}', DefaultPhonemizer='{singer.DefaultPhonemizer}', Location='{singer.Location}'");
 
             var timeAxis = project.timeAxis;
             var results = new List<PhonemeTiming>();
@@ -84,7 +85,8 @@ namespace OpenUtau.Cli {
                 track.Singer = singer;
                 // Use the phonemizer as configured in the USTX (via AfterLoad)
                 var phonemizer = track.Phonemizer;
-                Console.Error.WriteLine($"[DEBUG] Using phonemizer: {phonemizer.GetType().FullName}");
+                Console.Error.WriteLine($"[DEBUG] Using phonemizer type: {phonemizer.GetType().FullName}");
+                Console.Error.WriteLine($"[DEBUG] Phonemizer info: {phonemizer}");
                 phonemizer.SetSinger(singer);
                 phonemizer.SetTiming(timeAxis);
                 Console.Error.WriteLine("[DEBUG] Phonemizer SetSinger and SetTiming complete");
