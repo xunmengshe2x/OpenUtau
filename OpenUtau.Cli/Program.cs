@@ -84,8 +84,10 @@ namespace OpenUtau.Cli {
                 track.Singer = singer;
                 // Use the phonemizer as configured in the USTX (via AfterLoad)
                 var phonemizer = track.Phonemizer;
+                Console.Error.WriteLine($"[DEBUG] Using phonemizer: {phonemizer.GetType().FullName}");
                 phonemizer.SetSinger(singer);
                 phonemizer.SetTiming(timeAxis);
+                Console.Error.WriteLine("[DEBUG] Phonemizer SetSinger and SetTiming complete");
 
                 // Group notes into phonemizer note groups
                 var notes = part.notes.ToList();
@@ -106,7 +108,9 @@ namespace OpenUtau.Cli {
 
                 // Initialize phonemizer
                 try {
+                    Console.Error.WriteLine($"[DEBUG] Setting up phonemizer for part '{part.DisplayName}' with {groups.Count} groups");
                     phonemizer.SetUp(groups.ToArray(), project, track);
+                    Console.Error.WriteLine("[DEBUG] Phonemizer SetUp complete");
                 } catch (Exception e) {
                     Console.Error.WriteLine($"Error: phonemizer setup failed: {e.Message}");
                     continue;
@@ -168,6 +172,7 @@ namespace OpenUtau.Cli {
                     phonemeResults.Insert(0, res.phonemes);
                 }
                 phonemizer.CleanUp();
+                Console.Error.WriteLine("[DEBUG] Phonemizer CleanUp complete");
 
                 // Collect timing results
                 int noteIndexCounter = 0;
