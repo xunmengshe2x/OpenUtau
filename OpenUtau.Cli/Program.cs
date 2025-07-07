@@ -148,6 +148,8 @@ namespace OpenUtau.Cli {
                         Console.Error.WriteLine($"Error: phonemizer error on note group {i}: {e.Message}");
                         res = new Phonemizer.Result { phonemes = new[] { new Phonemizer.Phoneme { phoneme = "error" } } };
                     }
+                    // DEBUG: dump raw phoneme aliases for this group
+                    Console.Error.WriteLine($"[DEBUG] Group {i} raw phonemes: {string.Join(' ', res.phonemes.Select(p => p.phoneme))}");
                     if (phonemizer.LegacyMapping) {
                         for (int k = 0; k < res.phonemes.Length; k++) {
                             var ph = res.phonemes[k];
