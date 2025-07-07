@@ -24,8 +24,30 @@ namespace OpenUtau.Cli {
 
     class Program {
         static int Main(string[] args) {
+            if (args.Length >= 1 && args[0].Equals("install", StringComparison.OrdinalIgnoreCase)) {
+                if (args.Length < 2) {
+                    Console.WriteLine(
+                        "Usage: dotnet run --project OpenUtau.Cli -- install <dependency.oudep>");
+                    return 1;
+                }
+                var archivePath = args[1];
+                if (!File.Exists(archivePath)) {
+                    Console.Error.WriteLine($"Error: dependency file not found: {archivePath}");
+                    return 1;
+                }
+                try {
+                    DependencyInstaller.Install(archivePath);
+                    Console.WriteLine($"Installed dependency '{Path.GetFileName(archivePath)}'");
+                    return 0;
+                } catch (Exception e) {
+                    Console.Error.WriteLine($"Error: failed to install dependency: {e.Message}");
+                    return 1;
+                }
+            }
             if (args.Length < 2) {
-                Console.WriteLine("Usage: dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> [output.json]");
+                Console.WriteLine(
+                    "Usage: dotnet run --project OpenUtau.Cli -- install <dependency.oudep>\n" +
+                    "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> [output.json]");
                 return 1;
             }
             var ustxPath = args[0];
