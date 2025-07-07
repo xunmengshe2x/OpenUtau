@@ -137,6 +137,9 @@ namespace OpenUtau.Cli {
                         grp[grp.Length - 1].duration += push;
                     }
                     Phonemizer.Result res;
+                    // DEBUG: show input lyrics for this note group
+                    Console.Error.WriteLine(
+                        $"[DEBUG] Group {i} input lyrics: {string.Join(' ', grp.Select(n => '"' + n.lyric + '"'))}");
                     try {
                         res = phonemizer.Process(grp,
                             prev,
