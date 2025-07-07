@@ -21,7 +21,6 @@ using Serilog;
 namespace OpenUtau.Plugin.Builtin {
     [Phonemizer("Enunu Onnx Phonemizer", "ENUNU X")]
     public class EnunuOnnxPhonemizer : Phonemizer {
-        readonly string PhonemizerType = "ENUNU X";
 
         //singer-related informations used by this phonemizer
         //basic informations

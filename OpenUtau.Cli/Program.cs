@@ -49,6 +49,9 @@ namespace OpenUtau.Cli {
             // Initialize singer and tools
             SingerManager.Inst.Initialize();
             ToolsManager.Inst.Initialize();
+            // Register built-in & external phonemizer plugins so tracks can pick up the correct phonemizer
+            DocManager.Inst.SearchAllPlugins();
+            DocManager.Inst.SearchAllLegacyPlugins();
 
             UProject project;
             try {
