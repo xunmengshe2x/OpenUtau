@@ -12,7 +12,6 @@ using OpenUtau.Core.Ustx;
 using Ustx = OpenUtau.Core.Format.Ustx;
 using OpenUtau.Core.Format;
 using OpenUtau.Classic;
-using OpenUtau.Api;
 using OpenUtau.Core.Util;
 
 namespace OpenUtau.Cli {
@@ -83,9 +82,8 @@ namespace OpenUtau.Cli {
             foreach (var part in project.parts.OfType<UVoicePart>()) {
                 var track = project.tracks[part.trackNo];
                 track.Singer = singer;
-                // Instantiate the phonemizer configured in the USTX (UI logic):
-                var factory = PhonemizerFactory.Get(track.PhonemizerTag);
-                var phonemizer = factory.Create();
+                // Use the phonemizer as configured in the USTX (via AfterLoad)
+                var phonemizer = track.Phonemizer;
                 phonemizer.SetSinger(singer);
                 phonemizer.SetTiming(timeAxis);
 
