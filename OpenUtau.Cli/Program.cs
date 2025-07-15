@@ -54,6 +54,7 @@ namespace OpenUtau.Cli {
                     "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> [output.json] [output.wav]\n" +
                     "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> <output.wav>\n" +
                     "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> [output.json] [output.wav] --reset-timings\n" +
+                    "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> [output.json] [output.wav] --reset-timings --preserve-silence-timing\n" +
                     "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> [output.json] [output.wav] --phoneme-override lyric:phoneme_index:old_phoneme:new_phoneme");
                 return 1;
             }
@@ -62,6 +63,7 @@ namespace OpenUtau.Cli {
             string outputPath = null;
             string outputWav = null;
             bool resetTimings = false;
+            bool preserveSilenceTiming = false;
             var phonemeOverrides = new List<(string lyric, int phonemeIndex, string oldPhoneme, string newPhoneme)>();
             
             // Parse remaining arguments
@@ -69,6 +71,8 @@ namespace OpenUtau.Cli {
                 var arg = args[i];
                 if (arg.Equals("--reset-timings", StringComparison.OrdinalIgnoreCase)) {
                     resetTimings = true;
+                } else if (arg.Equals("--preserve-silence-timing", StringComparison.OrdinalIgnoreCase)) {
+                    preserveSilenceTiming = true;
                 } else if (arg.StartsWith("--phoneme-override", StringComparison.OrdinalIgnoreCase)) {
                     if (i + 1 < args.Length) {
                         var overrideSpec = args[i + 1];
@@ -98,6 +102,7 @@ namespace OpenUtau.Cli {
             }
             Console.Error.WriteLine($"[DEBUG] outputWav parameter = '{outputWav}'");
             Console.Error.WriteLine($"[DEBUG] resetTimings = {resetTimings}");
+            Console.Error.WriteLine($"[DEBUG] preserveSilenceTiming = {preserveSilenceTiming}");
             if (!File.Exists(ustxPath)) {
                 Console.Error.WriteLine($"Error: USTX file not found: {ustxPath}");
                 return 1;
@@ -131,25 +136,56 @@ namespace OpenUtau.Cli {
 
             // Reset phoneme timings if requested
             if (resetTimings) {
-                Console.Error.WriteLine("[DEBUG] Resetting phoneme timings for all notes");
-                int resetCount = 0;
+                Console.Error.WriteLine("[DEBUG] Resetting phoneme timings and aliases for all notes");
+                int timingResetCount = 0;
+                int aliasResetCount = 0;
+                int preservedSilenceCount = 0;
                 foreach (var part in project.parts.OfType<UVoicePart>()) {
                     foreach (var note in part.notes) {
-                        bool hadOverrides = false;
+                        bool hadTimingOverrides = false;
+                        bool hadAliasOverrides = false;
                         foreach (var phonemeOverride in note.phonemeOverrides) {
-                            if (phonemeOverride.offset != null || phonemeOverride.preutterDelta != null || phonemeOverride.overlapDelta != null) {
-                                hadOverrides = true;
-                                phonemeOverride.offset = null;
-                                phonemeOverride.preutterDelta = null;
-                                phonemeOverride.overlapDelta = null;
+                            // Check if this is a SP/AP phoneme
+                            bool isSilencePhoneme = phonemeOverride.phoneme != null && 
+                                (phonemeOverride.phoneme.Equals("SP", StringComparison.OrdinalIgnoreCase) || 
+                                 phonemeOverride.phoneme.Equals("AP", StringComparison.OrdinalIgnoreCase));
+                            
+                            if (isSilencePhoneme && preserveSilenceTiming) {
+                                // Preserve ALL SP/AP phoneme information (timing + phoneme)
+                                Console.Error.WriteLine($"[DEBUG] Fully preserving silence phoneme '{phonemeOverride.phoneme}' on note '{note.lyric}' index {phonemeOverride.index} (offset={phonemeOverride.offset})");
+                                preservedSilenceCount++;
+                            } else {
+                                // Reset timing overrides
+                                if (phonemeOverride.offset != null || phonemeOverride.preutterDelta != null || phonemeOverride.overlapDelta != null) {
+                                    hadTimingOverrides = true;
+                                    phonemeOverride.offset = null;
+                                    phonemeOverride.preutterDelta = null;
+                                    phonemeOverride.overlapDelta = null;
+                                }
+                                // Reset phoneme alias overrides, but preserve SP/AP phonemes even if timing is reset
+                                if (phonemeOverride.phoneme != null) {
+                                    if (isSilencePhoneme) {
+                                        // Keep the SP/AP phoneme name but allow timing to be reset
+                                        Console.Error.WriteLine($"[DEBUG] Preserving silence phoneme name '{phonemeOverride.phoneme}' on note '{note.lyric}' index {phonemeOverride.index} (timing reset)");
+                                        preservedSilenceCount++;
+                                    } else {
+                                        hadAliasOverrides = true;
+                                        phonemeOverride.phoneme = null;
+                                    }
+                                }
                             }
                         }
-                        if (hadOverrides) {
-                            resetCount++;
+                        if (hadTimingOverrides) {
+                            timingResetCount++;
+                        }
+                        if (hadAliasOverrides) {
+                            aliasResetCount++;
                         }
                     }
                 }
-                Console.Error.WriteLine($"[DEBUG] Reset phoneme timing overrides for {resetCount} note(s)");
+                Console.Error.WriteLine($"[DEBUG] Reset phoneme timing overrides for {timingResetCount} note(s)");
+                Console.Error.WriteLine($"[DEBUG] Reset phoneme alias overrides for {aliasResetCount} note(s)");
+                Console.Error.WriteLine($"[DEBUG] Preserved {preservedSilenceCount} silence phoneme(s) (SP/AP)");
             }
 
             var singer = SingerManager.Inst.GetSinger(singerId);
@@ -175,6 +211,7 @@ namespace OpenUtau.Cli {
 
             // Process each voice part
             foreach (var part in project.parts.OfType<UVoicePart>()) {
+                
                 var track = project.tracks[part.trackNo];
                 track.Singer = singer;
                 // Use the phonemizer as configured in the USTX (via AfterLoad)
@@ -334,6 +371,12 @@ namespace OpenUtau.Cli {
                             Parent = parentNote
                         };
                         part.phonemes.Add(up);
+                        
+                        // Debug: show which phonemes are being added
+                        if (ph.phoneme.Equals("SP", StringComparison.OrdinalIgnoreCase) || 
+                            ph.phoneme.Equals("AP", StringComparison.OrdinalIgnoreCase)) {
+                            Console.Error.WriteLine($"[DEBUG] Adding silence phoneme: '{ph.phoneme}' at position {ph.position}");
+                        }
                     }
                 }
                 
@@ -358,6 +401,12 @@ namespace OpenUtau.Cli {
                         phoneme.preutterDelta = o.preutterDelta;
                         phoneme.overlapDelta = o.overlapDelta;
                         Console.Error.WriteLine($"[DEBUG] Applied phoneme override: note '{note.lyric}' phoneme {phoneme.index} pos+={o.offset ?? 0} phoneme='{phoneme.phoneme}'");
+                        
+                        // Debug: Check if this created a silence phoneme
+                        if (phoneme.phoneme.Equals("SP", StringComparison.OrdinalIgnoreCase) || 
+                            phoneme.phoneme.Equals("AP", StringComparison.OrdinalIgnoreCase)) {
+                            Console.Error.WriteLine($"[DEBUG] Created silence phoneme '{phoneme.phoneme}' via override");
+                        }
                     }
                 }
                 
@@ -367,9 +416,9 @@ namespace OpenUtau.Cli {
                 for (int i = part.phonemes.Count - 2; i >= 0; --i) {
                     var currentPhoneme = part.phonemes[i];
                     var nextPhoneme = part.phonemes[i + 1];
-                    var minPosition = Math.Min(currentPhoneme.position, nextPhoneme.position - 10);
-                    if (currentPhoneme.position != minPosition) {
-                        currentPhoneme.position = minPosition;
+                    var originalPosition = currentPhoneme.position;
+                    currentPhoneme.position = Math.Min(currentPhoneme.position, nextPhoneme.position - 10);
+                    if (currentPhoneme.position != originalPosition) {
                         overlapFixes++;
                     }
                 }
@@ -407,6 +456,16 @@ namespace OpenUtau.Cli {
                     .ToList();
                 Console.Error.WriteLine(
                     $"[DEBUG] Part '{part.DisplayName}' → {part.renderPhrases.Count} render phrase(s)");
+                
+                // Debug: check for SP/AP phonemes in render phrases
+                foreach (var phrase in part.renderPhrases) {
+                    var silencePhones = phrase.phones.Where(p => 
+                        p.phoneme.Equals("SP", StringComparison.OrdinalIgnoreCase) || 
+                        p.phoneme.Equals("AP", StringComparison.OrdinalIgnoreCase)).ToList();
+                    if (silencePhones.Any()) {
+                        Console.Error.WriteLine($"[DEBUG] Found {silencePhones.Count} silence phones in phrase: {string.Join(", ", silencePhones.Select(p => p.phoneme))}");
+                    }
+                }
             }
                 var allPhrases = project.parts.OfType<UVoicePart>()
                     .SelectMany(vp => vp.renderPhrases.Select(rp => (vp.trackNo, rp)))
@@ -419,6 +478,35 @@ namespace OpenUtau.Cli {
                 for (int i = 0; i < allPhrases.Count; i++) {
                     var (trackNo, phrase) = allPhrases[i];
                     Console.Error.WriteLine($"[DEBUG] Rendering phrase {i + 1}/{allPhrases.Count} (track {trackNo})...");
+                    
+                    // Check if this phrase contains only SP/AP phonemes (silence/pause)
+                    bool isSilencePhrase = phrase.phones.All(p => 
+                        p.phoneme.Equals("SP", StringComparison.OrdinalIgnoreCase) || 
+                        p.phoneme.Equals("AP", StringComparison.OrdinalIgnoreCase));
+                    
+                    if (isSilencePhrase) {
+                        Console.Error.WriteLine($"[DEBUG]   Phrase contains only silence phonemes (SP/AP), generating silence");
+                        var silenceLayout = renderer.Layout(phrase);
+                        double silencePhraseStartMs = silenceLayout.positionMs - silenceLayout.leadingMs;
+                        
+                        // Insert silence gap if there's a gap between phrases
+                        if (i > 0 && silencePhraseStartMs > lastPhraseEndMs) {
+                            double gapMs = silencePhraseStartMs - lastPhraseEndMs;
+                            int gapSamples = (int)(gapMs * 44100 / 1000);
+                            Console.Error.WriteLine($"[DEBUG]   Gap → inserting {gapMs:F2}ms ({gapSamples} samples) of silence");
+                            samples.AddRange(new float[gapSamples]);
+                        }
+                        
+                        // Generate silence for the duration of this phrase
+                        int silenceSamples = (int)(silenceLayout.estimatedLengthMs * 44100 / 1000);
+                        Console.Error.WriteLine($"[DEBUG]   Generating {silenceLayout.estimatedLengthMs:F2}ms ({silenceSamples} samples) of silence for SP/AP phonemes");
+                        samples.AddRange(new float[silenceSamples]);
+                        
+                        // Update last phrase end time
+                        lastPhraseEndMs = silencePhraseStartMs + silenceLayout.estimatedLengthMs;
+                        continue;
+                    }
+                    
                     var layout = renderer.Layout(phrase);
                     Console.Error.WriteLine(
                         $"[DEBUG]   Layout → estLenMs={layout.estimatedLengthMs}, leadingMs={layout.leadingMs}, positionMs={layout.positionMs}");
