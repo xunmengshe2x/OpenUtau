@@ -13,6 +13,10 @@ using Ustx = OpenUtau.Core.Format.Ustx;
 using OpenUtau.Core.Format;
 using OpenUtau.Classic;
 using OpenUtau.Core.Util;
+using System.Diagnostics;
+using OpenUtau.Core.Render;
+using OpenUtau.Core.SignalChain;
+using NAudio.Wave;
 
 namespace OpenUtau.Cli {
     class PhonemeTiming {
@@ -47,12 +51,53 @@ namespace OpenUtau.Cli {
             if (args.Length < 2) {
                 Console.WriteLine(
                     "Usage: dotnet run --project OpenUtau.Cli -- install <dependency.oudep>\n" +
-                    "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> [output.json]");
+                    "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> [output.json] [output.wav]\n" +
+                    "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> <output.wav>\n" +
+                    "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> [output.json] [output.wav] --reset-timings\n" +
+                    "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> [output.json] [output.wav] --phoneme-override lyric:phoneme_index:old_phoneme:new_phoneme");
                 return 1;
             }
             var ustxPath = args[0];
             var singerId = args[1];
-            var outputPath = args.Length >= 3 ? args[2] : null;
+            string outputPath = null;
+            string outputWav = null;
+            bool resetTimings = false;
+            var phonemeOverrides = new List<(string lyric, int phonemeIndex, string oldPhoneme, string newPhoneme)>();
+            
+            // Parse remaining arguments
+            for (int i = 2; i < args.Length; i++) {
+                var arg = args[i];
+                if (arg.Equals("--reset-timings", StringComparison.OrdinalIgnoreCase)) {
+                    resetTimings = true;
+                } else if (arg.StartsWith("--phoneme-override", StringComparison.OrdinalIgnoreCase)) {
+                    if (i + 1 < args.Length) {
+                        var overrideSpec = args[i + 1];
+                        var parts = overrideSpec.Split(':');
+                        if (parts.Length == 4) {
+                            var lyric = parts[0];
+                            if (int.TryParse(parts[1], out int phonemeIndex)) {
+                                var oldPhoneme = parts[2];
+                                var newPhoneme = parts[3];
+                                phonemeOverrides.Add((lyric, phonemeIndex, oldPhoneme, newPhoneme));
+                                Console.Error.WriteLine($"[DEBUG] Phoneme override added: '{lyric}' phoneme {phonemeIndex} '{oldPhoneme}' → '{newPhoneme}'");
+                            } else {
+                                Console.Error.WriteLine($"[WARNING] Invalid phoneme index in override: {overrideSpec}");
+                            }
+                        } else {
+                            Console.Error.WriteLine($"[WARNING] Invalid phoneme override format: {overrideSpec}. Expected: lyric:phoneme_index:old_phoneme:new_phoneme");
+                        }
+                        i++; // Skip the next argument as it's the override specification
+                    } else {
+                        Console.Error.WriteLine("[WARNING] --phoneme-override requires a specification argument");
+                    }
+                } else if (Path.GetExtension(arg).Equals(".wav", StringComparison.OrdinalIgnoreCase)) {
+                    outputWav = arg;
+                } else if (outputPath == null) {
+                    outputPath = arg;
+                }
+            }
+            Console.Error.WriteLine($"[DEBUG] outputWav parameter = '{outputWav}'");
+            Console.Error.WriteLine($"[DEBUG] resetTimings = {resetTimings}");
             if (!File.Exists(ustxPath)) {
                 Console.Error.WriteLine($"Error: USTX file not found: {ustxPath}");
                 return 1;
@@ -71,9 +116,10 @@ namespace OpenUtau.Cli {
             // Initialize singer and tools
             SingerManager.Inst.Initialize();
             ToolsManager.Inst.Initialize();
-            // Register built-in & external phonemizer plugins so tracks can pick up the correct phonemizer
+            // Register built-in & external phonemizer plugins and start the phonemizer runner
             DocManager.Inst.SearchAllPlugins();
             DocManager.Inst.SearchAllLegacyPlugins();
+            DocManager.Inst.Initialize(Thread.CurrentThread, TaskScheduler.Current);
 
             UProject project;
             try {
@@ -81,6 +127,29 @@ namespace OpenUtau.Cli {
             } catch (Exception e) {
                 Console.Error.WriteLine($"Error: failed to load project: {e.Message}");
                 return 1;
+            }
+
+            // Reset phoneme timings if requested
+            if (resetTimings) {
+                Console.Error.WriteLine("[DEBUG] Resetting phoneme timings for all notes");
+                int resetCount = 0;
+                foreach (var part in project.parts.OfType<UVoicePart>()) {
+                    foreach (var note in part.notes) {
+                        bool hadOverrides = false;
+                        foreach (var phonemeOverride in note.phonemeOverrides) {
+                            if (phonemeOverride.offset != null || phonemeOverride.preutterDelta != null || phonemeOverride.overlapDelta != null) {
+                                hadOverrides = true;
+                                phonemeOverride.offset = null;
+                                phonemeOverride.preutterDelta = null;
+                                phonemeOverride.overlapDelta = null;
+                            }
+                        }
+                        if (hadOverrides) {
+                            resetCount++;
+                        }
+                    }
+                }
+                Console.Error.WriteLine($"[DEBUG] Reset phoneme timing overrides for {resetCount} note(s)");
             }
 
             var singer = SingerManager.Inst.GetSinger(singerId);
@@ -119,6 +188,7 @@ namespace OpenUtau.Cli {
                 // Group notes into phonemizer note groups
                 var notes = part.notes.ToList();
                 var groups = new List<Phonemizer.Note[]>();
+                var groupToNote = new List<UNote>(); // Track which UNote each group represents
                 for (int idx = 0, noteIndex = 0; idx < notes.Count; idx++, noteIndex++) {
                     var note = notes[idx];
                     if (note.OverlapError || note.Extends != null) {
@@ -131,6 +201,7 @@ namespace OpenUtau.Cli {
                         next = next.Next;
                     }
                     groups.Add(groupNotes.Select(n => n.ToPhonemizerNote(track, part)).ToArray());
+                    groupToNote.Add(note); // Store the primary note for this group
                 }
 
                 // Initialize phonemizer
@@ -201,10 +272,38 @@ namespace OpenUtau.Cli {
                     Console.Error.WriteLine($"[DEBUG] Group {i} phoneme tick positions: {string.Join(' ', res.phonemes.Select(p => p.position.ToString()))}");
                     phonemeResults.Insert(0, res.phonemes);
                 }
+                
+                // Apply phoneme overrides
+                if (phonemeOverrides.Count > 0) {
+                    Console.Error.WriteLine($"[DEBUG] Applying {phonemeOverrides.Count} phoneme override(s)");
+                    for (int gi = 0; gi < groups.Count; gi++) {
+                        var grp = groups[gi];
+                        var groupNote = groupToNote[gi];
+                        var groupLyric = groupNote.lyric;
+                        
+                        foreach (var (targetLyric, phonemeIndex, oldPhoneme, newPhoneme) in phonemeOverrides) {
+                            if (groupLyric.Equals(targetLyric, StringComparison.OrdinalIgnoreCase)) {
+                                var phonemeArray = phonemeResults[gi];
+                                if (phonemeIndex >= 0 && phonemeIndex < phonemeArray.Length) {
+                                    var currentPhoneme = phonemeArray[phonemeIndex].phoneme;
+                                    if (string.IsNullOrEmpty(oldPhoneme) || currentPhoneme.Equals(oldPhoneme, StringComparison.OrdinalIgnoreCase)) {
+                                        Console.Error.WriteLine($"[DEBUG] Override applied: lyric '{groupLyric}' phoneme {phonemeIndex} '{currentPhoneme}' → '{newPhoneme}'");
+                                        phonemeArray[phonemeIndex].phoneme = newPhoneme;
+                                    } else {
+                                        Console.Error.WriteLine($"[DEBUG] Override skipped: lyric '{groupLyric}' phoneme {phonemeIndex} expected '{oldPhoneme}' but found '{currentPhoneme}'");
+                                    }
+                                } else {
+                                    Console.Error.WriteLine($"[DEBUG] Override skipped: lyric '{groupLyric}' phoneme index {phonemeIndex} out of range (0-{phonemeArray.Length - 1})");
+                                }
+                            }
+                        }
+                    }
+                }
+                
                 phonemizer.CleanUp();
                 Console.Error.WriteLine("[DEBUG] Phonemizer CleanUp complete");
 
-                // Collect timing results
+                // Collect timing results & inject into part.phonemes for later rendering
                 int noteIndexCounter = 0;
                 for (int gi = 0; gi < groups.Count; gi++) {
                     for (int pi = 0; pi < phonemeResults[gi].Length; pi++) {
@@ -221,6 +320,32 @@ namespace OpenUtau.Cli {
                     }
                     noteIndexCounter++;
                 }
+                // Inject phonemes into part for RenderPhrase.FromPart
+                part.phonemes.Clear();
+                for (int gi = 0; gi < phonemeResults.Count; gi++) {
+                    var group = phonemeResults[gi];
+                    var parentNote = gi < groupToNote.Count ? groupToNote[gi] : null;
+                    foreach (var ph in group) {
+                        var up = new UPhoneme() {
+                            rawPosition = ph.position - part.position,
+                            position = ph.position - part.position,
+                            rawPhoneme = ph.phoneme,
+                            phoneme = ph.phoneme,
+                            Parent = parentNote,
+                            index = ph.index ?? 0
+                        };
+                        part.phonemes.Add(up);
+                    }
+                }
+                // Validate the part to calculate phoneme durations and set up Prev/Next pointers
+                var partTrack = project.tracks[part.trackNo];
+                var validateOptions = new ValidateOptions {
+                    SkipTiming = false,
+                    Part = part,
+                    SkipPhonemizer = true,
+                    SkipPhoneme = false
+                };
+                part.Validate(validateOptions, project, partTrack);
             }
 
             // Output JSON
@@ -230,6 +355,110 @@ namespace OpenUtau.Cli {
                 File.WriteAllText(outputPath, output);
             } else {
                 Console.WriteLine(output);
+            }
+            Console.Error.WriteLine($"[DEBUG] Skipping audio render block? outputWav.IsNullOrEmpty={string.IsNullOrEmpty(outputWav)}");
+            if (!string.IsNullOrEmpty(outputWav)) {
+            Console.Error.WriteLine("[DEBUG] Populating render phrases for audio rendering");
+            foreach (var part in project.parts.OfType<UVoicePart>()) {
+                var track = project.tracks[part.trackNo];
+                // Ensure the renderer settings have been initialized (as GUI does on load)
+                track.RendererSettings.Validate(track);
+                part.renderPhrases = RenderPhrase
+                    .FromPart(project, track, part)
+                    .ToList();
+                Console.Error.WriteLine(
+                    $"[DEBUG] Part '{part.DisplayName}' → {part.renderPhrases.Count} render phrase(s)");
+            }
+                var allPhrases = project.parts.OfType<UVoicePart>()
+                    .SelectMany(vp => vp.renderPhrases.Select(rp => (vp.trackNo, rp)))
+                    .ToList();
+                Console.Error.WriteLine($"[DEBUG] Starting audio rendering of {allPhrases.Count} phrase(s)...");
+                var renderer = Renderers.CreateRenderer(Renderers.GetDefaultRenderer(singer.SingerType));
+                var samples = new List<float>();
+                double lastPhraseEndMs = 0;
+                
+                for (int i = 0; i < allPhrases.Count; i++) {
+                    var (trackNo, phrase) = allPhrases[i];
+                    Console.Error.WriteLine($"[DEBUG] Rendering phrase {i + 1}/{allPhrases.Count} (track {trackNo})...");
+                    var layout = renderer.Layout(phrase);
+                    Console.Error.WriteLine(
+                        $"[DEBUG]   Layout → estLenMs={layout.estimatedLengthMs}, leadingMs={layout.leadingMs}, positionMs={layout.positionMs}");
+                    
+                    // Calculate phrase start time (accounting for leading silence)
+                    double phraseStartMs = layout.positionMs - layout.leadingMs;
+                    
+                    // Insert silence gap if there's a gap between phrases
+                    if (i > 0 && phraseStartMs > lastPhraseEndMs) {
+                        double gapMs = phraseStartMs - lastPhraseEndMs;
+                        int gapSamples = (int)(gapMs * 44100 / 1000);
+                        Console.Error.WriteLine($"[DEBUG]   Gap → inserting {gapMs:F2}ms ({gapSamples} samples) of silence");
+                        samples.AddRange(new float[gapSamples]);
+                    }
+                    
+                    var cancellationTokenSource = new CancellationTokenSource();
+                    
+                    RenderResult res;
+                    try {
+                        var renderTask = renderer.Render(
+                            phrase,
+                            new Progress(allPhrases.Count),
+                            trackNo,
+                            cancellationTokenSource,
+                            false
+                        );
+                        
+                        // Wait for either the render to complete or timeout
+                        if (renderTask.Wait(TimeSpan.FromMinutes(2))) {
+                            res = renderTask.Result;
+                        } else {
+                            Console.Error.WriteLine($"[ERROR] Phrase {i + 1} rendering timed out after 2 minutes - skipping");
+                            cancellationTokenSource.Cancel();
+                            continue;
+                        }
+                    } catch (Exception ex) {
+                        Console.Error.WriteLine($"[ERROR] Phrase {i + 1} rendering failed: {ex.Message}");
+                        continue; // Skip this phrase and continue with the next
+                    }
+                    Console.Error.WriteLine(
+                        $"[DEBUG]   Render → samples.Length={(res.samples?.Length ?? 0)}, leadingMs={res.leadingMs}, positionMs={res.positionMs}, estimatedLengthMs={res.estimatedLengthMs}");
+                    
+                    if (res.samples != null) {
+                        // Apply dynamics processing like the UI
+                        Renderers.ApplyDynamics(phrase, res);
+                        
+                        // Apply basic volume control (simplified)
+                        var track = project.tracks[trackNo];
+                        var volumeScale = PlaybackManager.DecibelToVolume(track.Muted ? -24 : track.Volume);
+                        if (volumeScale != 1.0f) {
+                            for (int j = 0; j < res.samples.Length; j++) {
+                                res.samples[j] *= volumeScale;
+                            }
+                        }
+                        
+                        samples.AddRange(res.samples);
+                        // Update last phrase end time
+                        lastPhraseEndMs = phraseStartMs + (res.samples.Length * 1000.0 / 44100);
+                    }
+                }
+                
+                var finalSamples = samples.ToArray();
+                
+                Console.Error.WriteLine($"[DEBUG] Final mix: {finalSamples.Length} samples ({finalSamples.Length * 1000.0 / 44100:F2}ms)");
+                
+                // Export as 16-bit WAV like the UI
+                var wavDir = Path.GetDirectoryName(outputWav);
+                if (string.IsNullOrEmpty(wavDir)) wavDir = ".";
+                Directory.CreateDirectory(wavDir);
+                
+                // Convert to 16-bit and write
+                var samples16 = new short[finalSamples.Length];
+                for (int i = 0; i < finalSamples.Length; i++) {
+                    samples16[i] = (short)(Math.Max(-1f, Math.Min(1f, finalSamples[i])) * 32767);
+                }
+                
+                using var writer = new WaveFileWriter(outputWav, new WaveFormat(44100, 16, 1));
+                writer.WriteSamples(samples16, 0, samples16.Length);
+                Console.Error.WriteLine($"16-bit WAV written to {outputWav}");
             }
             return 0;
         }
