@@ -320,23 +320,61 @@ namespace OpenUtau.Cli {
                     }
                     noteIndexCounter++;
                 }
-                // Inject phonemes into part for RenderPhrase.FromPart
+                // Inject phonemes into part for RenderPhrase.FromPart - UI-style processing
                 part.phonemes.Clear();
                 for (int gi = 0; gi < phonemeResults.Count; gi++) {
                     var group = phonemeResults[gi];
                     var parentNote = gi < groupToNote.Count ? groupToNote[gi] : null;
                     foreach (var ph in group) {
+                        // UI-style phoneme creation: only set raw values initially
                         var up = new UPhoneme() {
                             rawPosition = ph.position - part.position,
-                            position = ph.position - part.position,
                             rawPhoneme = ph.phoneme,
-                            phoneme = ph.phoneme,
-                            Parent = parentNote,
-                            index = ph.index ?? 0
+                            index = ph.index ?? 0,
+                            Parent = parentNote
                         };
                         part.phonemes.Add(up);
                     }
                 }
+                
+                Console.Error.WriteLine($"[DEBUG] Created {part.phonemes.Count} phonemes, applying UI-style timing processing");
+                
+                // Apply phoneme overrides like the UI does (UPart.cs:213-229)
+                foreach (var phoneme in part.phonemes) {
+                    phoneme.position = phoneme.rawPosition;
+                    phoneme.phoneme = phoneme.rawPhoneme;
+                    phoneme.preutterDelta = null;
+                    phoneme.overlapDelta = null;
+                    
+                    var note = phoneme.Parent;
+                    if (note == null) {
+                        continue;
+                    }
+                    
+                    var o = note.phonemeOverrides.FirstOrDefault(o => o.index == phoneme.index);
+                    if (o != null) {
+                        phoneme.position += o.offset ?? 0;  // Critical timing adjustment
+                        phoneme.phoneme = !string.IsNullOrWhiteSpace(o.phoneme) ? o.phoneme : phoneme.rawPhoneme;
+                        phoneme.preutterDelta = o.preutterDelta;
+                        phoneme.overlapDelta = o.overlapDelta;
+                        Console.Error.WriteLine($"[DEBUG] Applied phoneme override: note '{note.lyric}' phoneme {phoneme.index} pos+={o.offset ?? 0} phoneme='{phoneme.phoneme}'");
+                    }
+                }
+                
+                // Safety treatment to prevent phoneme overlaps (UPart.cs:230-233)
+                Console.Error.WriteLine("[DEBUG] Applying safety treatment to prevent phoneme overlaps");
+                int overlapFixes = 0;
+                for (int i = part.phonemes.Count - 2; i >= 0; --i) {
+                    var currentPhoneme = part.phonemes[i];
+                    var nextPhoneme = part.phonemes[i + 1];
+                    var minPosition = Math.Min(currentPhoneme.position, nextPhoneme.position - 10);
+                    if (currentPhoneme.position != minPosition) {
+                        currentPhoneme.position = minPosition;
+                        overlapFixes++;
+                    }
+                }
+                Console.Error.WriteLine($"[DEBUG] Safety treatment applied {overlapFixes} overlap fixes");
+                
                 // Validate the part to calculate phoneme durations and set up Prev/Next pointers
                 var partTrack = project.tracks[part.trackNo];
                 var validateOptions = new ValidateOptions {
@@ -346,6 +384,7 @@ namespace OpenUtau.Cli {
                     SkipPhoneme = false
                 };
                 part.Validate(validateOptions, project, partTrack);
+                Console.Error.WriteLine($"[DEBUG] Phoneme validation completed for part '{part.DisplayName}'");
             }
 
             // Output JSON
