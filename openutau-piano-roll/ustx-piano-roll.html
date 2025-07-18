@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>OpenUtau USTX Piano Roll Editor</title>
+  <style>
+    /* Basic reset and styling */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { font-family: sans-serif; background: #222; color: #ddd; }
+    h1 { text-align: center; margin: 10px 0; }
+    #fileInputContainer { 
+      text-align: center; 
+      margin: 10px 0;
+      display: flex;
+      gap: 10px;
+      justify-content: center;
+    }
+    .file-input-group {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 5px;
+    }
+    /* Editor container */
+    #editorContainer {
+      position: relative;
+      width: 1200px;
+      height: 800px;
+      margin: 0 auto;
+      border: 1px solid #555;
+      background: #1e1e1e;
+      overflow-y: auto;
+    }
+    /* Flex container for piano and roll */
+    #contentContainer { display: flex; }
+    /* Piano keyboard */
+    #piano {
+      width: 60px;
+      background: #999;
+      border: 1px solid #555;
+      font-size: 9px;
+      color: #000;
+      position: relative;
+      z-index: 5;
+    }
+    .piano-key {
+      height: 20px;
+      line-height: 20px;
+      text-align: center;
+      border-bottom: 1px solid #666;
+      font-size: 8px;
+    }
+    .piano-key.white { background: white; color: black; }
+    .piano-key.black { background: black; color: white; }
+    /* Roll container */
+    #rollContainer {
+      flex: 1;
+      position: relative;
+      overflow: hidden;
+    }
+    /* Inner container for grid & notes (88 keys tall) */
+    #innerContainer {
+      position: relative;
+      width: 100%;
+      height: calc(88 * 20px); /* 1760px */
+    }
+    .grid-line {
+      position: absolute;
+      background: #333;
+    }
+    /* SVG overlay for pitch curves */
+    #svgOverlay {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 4;
+      pointer-events: none;
+    }
+    #svgOverlay svg {
+      width: 100%; height: 100%;
+      pointer-events: none;
+    }
+    /* Notes layer */
+    #notesLayer {
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%;
+      height: 100%;
+      z-index: 3;
+      pointer-events: auto;
+    }
+    .note {
+      position: absolute;
+      background: rgba(255,165,0,0.7);
+      border: 1px solid #ffa500;
+      cursor: move;
+      user-select: none;
+      font-size: 12px;
+      padding: 2px;
+      overflow: hidden;
+      white-space: nowrap;
+    }
+    .note.extended {
+      background: rgba(255,165,0,0.4);
+      border: 1px dashed #ffa500;
+    }
+    .resizer {
+      position: absolute;
+      right: 0; top: 0;
+      width: 8px;
+      height: 100%;
+      background: rgba(255,255,255,0.7);
+      cursor: e-resize;
+    }
+    .pitch-curve {
+      stroke: #00ff00;
+      stroke-width: 2;
+      fill: none;
+      pointer-events: visiblePainted;
+    }
+    .control-point {
+      pointer-events: auto;
+      cursor: pointer;
+      stroke: #fff;
+      stroke-width: 1;
+    }
+    /* Phoneme Panel styling */
+    #phonemeLayer {
+      position: relative;
+      width: 1200px;
+      height: 60px;
+      margin: 10px auto;
+      background: #444;
+      overflow-x: auto;
+      white-space: nowrap;
+      font-family: monospace;
+      font-size: 11px;
+    }
+    .phoneme-note {
+      position: absolute;
+      height: 100%;
+      border: 1px solid #666;
+    }
+    .phoneme-seg {
+      display: inline-block;
+      height: 100%;
+      border-right: 1px solid #555;
+      text-align: center;
+      vertical-align: top;
+      color: #000;
+      background: #ADD8E6;
+      padding: 2px;
+      font-size: 10px;
+    }
+    /* Info display */
+    #infoDisplay {
+      margin: 20px auto;
+      width: 1200px;
+      background: #333;
+      padding: 10px;
+      color: #fff;
+      font-family: monospace;
+      white-space: pre-wrap;
+      font-size: 12px;
+    }
+    .status {
+      position: fixed;
+      top: 10px;
+      right: 10px;
+      background: rgba(0,0,0,0.8);
+      color: #fff;
+      padding: 10px;
+      border-radius: 5px;
+      font-size: 12px;
+    }
+  </style>
+</head>
+<body>
+  <div id="fileInputContainer">
+    <div class="file-input-group">
+      <input type="file" id="ustxInput" accept=".ustx">
+      <label for="ustxInput">Load USTX file</label>
+    </div>
+    <div class="file-input-group">
+      <input type="file" id="phonemeInput" accept=".json">
+      <label for="phonemeInput">Load Phoneme JSON (from CLI)</label>
+    </div>
+  </div>
+  <h1>OpenUtau USTX Piano Roll Editor</h1>
+  <div class="status" id="statusDisplay">
+    Load USTX file to begin
+  </div>
+  <div id="editorContainer">
+    <div id="contentContainer">
+      <div id="piano"></div>
+      <div id="rollContainer">
+        <div id="innerContainer">
+          <div id="notesLayer"></div>
+          <div id="svgOverlay"><svg></svg></div>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div id="phonemeLayer"></div>
+  <div id="infoDisplay"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/js-yaml@4.1.0/dist/js-yaml.min.js"></script>
+  <script>
+    // --------------------------
+    // Global Editor Parameters
+    // --------------------------
+    const editorContainer = document.getElementById('editorContainer');
+    const contentContainer = document.getElementById('contentContainer');
+    const rollContainer = document.getElementById('rollContainer');
+    const innerContainer = document.getElementById('innerContainer');
+    const innerWidth = innerContainer.clientWidth;
+    const keysCount = 88;
+    const keyHeight = 20;
+    const innerHeight = keysCount * keyHeight;
+    innerContainer.style.height = innerHeight + "px";
+    
+    // Horizontal spacing: scale factor for ticks to pixels
+    let ticksPerPixel = 1; // Will be calculated based on resolution
+    let projectResolution = 480; // Default, will be overridden by USTX
+    
+    // Global data
+    let ustxData = null;
+    let phonemeData = null;
+    let notes = [];
+    let projectInfo = null;
+
+    // --------------------------
+    // Status Display
+    // --------------------------
+    function updateStatus(message) {
+      document.getElementById('statusDisplay').textContent = message;
+    }
+
+    // --------------------------
+    // USTX File Processing
+    // --------------------------
+    document.getElementById('ustxInput').addEventListener('change', function(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+      
+      updateStatus('Loading USTX file...');
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        try {
+          ustxData = jsyaml.load(e.target.result);
+          processUSTXData(ustxData);
+          updateStatus('USTX loaded successfully');
+        } catch (err) {
+          updateStatus('Error parsing USTX file: ' + err.message);
+          console.error('USTX parsing error:', err);
+        }
+      };
+      reader.readAsText(file);
+    });
+
+    // --------------------------
+    // Phoneme JSON Processing
+    // --------------------------
+    document.getElementById('phonemeInput').addEventListener('change', function(e) {
+      const file = e.target.files[0];
+      if (!file) return;
+      
+      updateStatus('Loading phoneme data...');
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        try {
+          phonemeData = JSON.parse(e.target.result);
+          if (ustxData) {
+            processUSTXData(ustxData); // Reprocess with phoneme data
+          }
+          updateStatus('Phoneme data loaded');
+        } catch (err) {
+          updateStatus('Error parsing phoneme JSON: ' + err.message);
+          console.error('Phoneme parsing error:', err);
+        }
+      };
+      reader.readAsText(file);
+    });
+
+    function processUSTXData(data) {
+      projectInfo = {
+        name: data.name || 'Untitled',
+        resolution: data.resolution || 480,
+        bpm: data.bpm || 120,
+        tracks: data.tracks || []
+      };
+      
+      projectResolution = projectInfo.resolution;
+      ticksPerPixel = projectResolution / 100; // 100 pixels per beat
+      
+      // Extract notes from voice parts
+      notes = [];
+      if (data.voice_parts && data.voice_parts.length > 0) {
+        const part = data.voice_parts[0];
+        if (part.notes) {
+          part.notes.forEach((note, index) => {
+            // Convert USTX note to piano roll format
+            const pianoNote = {
+              id: index,
+              start: note.position / ticksPerPixel,
+              duration: note.duration / ticksPerPixel,
+              pitch: note.tone - 21, // Convert to piano roll pitch (0-87)
+              lyric: note.lyric || '',
+              ustxNote: note, // Keep reference to original
+              pitchCurve: convertPitchCurve(note.pitch),
+              phonemes: [],
+              isExtended: note.lyric === '+'
+            };
+            
+            // Add phoneme data if available
+            if (phonemeData) {
+              pianoNote.phonemes = getPhonemeDataForNote(index, pianoNote.duration);
+            }
+            
+            notes.push(pianoNote);
+          });
+        }
+      }
+      
+      // Draw everything
+      drawGrid();
+      drawPiano();
+      drawNotes();
+      drawCurve();
+      drawPhonemes();
+      updateInfoDisplay();
+    }
+
+    function convertPitchCurve(pitchData) {
+      if (!pitchData || !pitchData.data) return [{ time: 0, deviation: 0 }];
+      
+      return pitchData.data.map(point => ({
+        time: point.x / 100, // Convert to relative time
+        deviation: point.y * 0.1 // Convert to pixels
+      }));
+    }
+
+    function getPhonemeDataForNote(noteIndex, noteDuration) {
+      if (!phonemeData) return [];
+      
+      // Find phonemes for this note index
+      const notePhonemes = phonemeData.filter(p => p.NoteIndex === noteIndex);
+      
+      if (notePhonemes.length === 0) return [];
+      
+      // Convert to relative durations
+      const phonemes = [];
+      let lastTime = 0;
+      
+      notePhonemes.forEach((ph, i) => {
+        const nextTime = i < notePhonemes.length - 1 ? 
+          notePhonemes[i + 1].TimeMs : 
+          lastTime + (noteDuration * 100); // Estimate
+        
+        phonemes.push({
+          label: ph.Phoneme,
+          duration: (nextTime - lastTime) / 1000 // Convert ms to seconds
+        });
+        
+        lastTime = nextTime;
+      });
+      
+      return phonemes;
+    }
+
+    // --------------------------
+    // Draw Grid Lines
+    // --------------------------
+    function drawGrid() {
+      // Clear existing grid lines
+      const existingLines = innerContainer.querySelectorAll('.grid-line');
+      existingLines.forEach(line => line.remove());
+      
+      // Horizontal lines (semitones)
+      for (let i = 0; i <= keysCount; i++) {
+        const hLine = document.createElement('div');
+        hLine.className = 'grid-line';
+        hLine.style.top = (i * keyHeight) + 'px';
+        hLine.style.left = '0px';
+        hLine.style.width = innerWidth + 'px';
+        hLine.style.height = '1px';
+        innerContainer.appendChild(hLine);
+      }
+      
+      // Vertical lines (beats)
+      const beatWidth = projectResolution / ticksPerPixel;
+      const totalBeats = Math.floor(innerWidth / beatWidth);
+      for (let i = 0; i <= totalBeats; i++) {
+        const vLine = document.createElement('div');
+        vLine.className = 'grid-line';
+        vLine.style.left = (i * beatWidth) + 'px';
+        vLine.style.top = '0px';
+        vLine.style.width = '1px';
+        vLine.style.height = innerHeight + 'px';
+        innerContainer.appendChild(vLine);
+      }
+    }
+
+    // --------------------------
+    // Create Piano Keyboard
+    // --------------------------
+    function drawPiano() {
+      const piano = document.getElementById('piano');
+      piano.style.height = innerHeight + "px";
+      piano.innerHTML = "";
+      
+      function midiToNoteName(midi) {
+        const noteNames = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+        const note = noteNames[midi % 12];
+        const octave = Math.floor(midi / 12) - 1;
+        return note + octave;
+      }
+      
+      function isBlackKey(midi) {
+        const name = midiToNoteName(midi);
+        return name.includes("#");
+      }
+      
+      // Draw keys from top to bottom (high to low)
+      for (let i = keysCount - 1; i >= 0; i--) {
+        let midi = i + 21; // A0 = 21
+        const keyDiv = document.createElement('div');
+        keyDiv.className = "piano-key " + (isBlackKey(midi) ? "black" : "white");
+        keyDiv.style.height = keyHeight + "px";
+        keyDiv.textContent = midiToNoteName(midi);
+        piano.appendChild(keyDiv);
+      }
+    }
+
+    // --------------------------
+    // Note Rendering and Interaction
+    // --------------------------
+    let currentDragNote = null, dragOffsetX = 0, dragOffsetY = 0;
+    let currentResizeNote = null, resizeStartX = 0, initialNoteDuration = 0;
+
+    function drawNotes() {
+      const notesLayer = document.getElementById('notesLayer');
+      notesLayer.innerHTML = "";
+      
+      notes.forEach(note => {
+        const noteDiv = document.createElement('div');
+        noteDiv.className = 'note' + (note.isExtended ? ' extended' : '');
+        noteDiv.style.left = note.start + 'px';
+        noteDiv.style.top = (innerHeight - (note.pitch + 1) * keyHeight) + 'px';
+        noteDiv.style.width = note.duration + 'px';
+        noteDiv.style.height = (keyHeight - 2) + 'px';
+        noteDiv.textContent = note.lyric;
+        
+        note.div = noteDiv;
+        
+        // Mouse events for dragging
+        noteDiv.addEventListener('mousedown', function(e) {
+          if (e.target.classList.contains('resizer')) return;
+          currentDragNote = note;
+          const rect = noteDiv.getBoundingClientRect();
+          dragOffsetX = e.clientX - rect.left;
+          dragOffsetY = e.clientY - rect.top;
+          document.addEventListener('mousemove', dragNote);
+          document.addEventListener('mouseup', endDragNote);
+        });
+        
+        // Resizer handle
+        if (!note.isExtended) {
+          const resizer = document.createElement('div');
+          resizer.className = 'resizer';
+          noteDiv.appendChild(resizer);
+          
+          resizer.addEventListener('mousedown', function(e) {
+            e.stopPropagation();
+            currentResizeNote = note;
+            resizeStartX = e.clientX;
+            initialNoteDuration = note.duration;
+            document.addEventListener('mousemove', resizeNote);
+            document.addEventListener('mouseup', endResizeNote);
+          });
+        }
+        
+        notesLayer.appendChild(noteDiv);
+      });
+    }
+
+    function dragNote(e) {
+      if (!currentDragNote) return;
+      
+      const rect = innerContainer.getBoundingClientRect();
+      let newLeft = e.clientX - rect.left - dragOffsetX;
+      newLeft = Math.max(0, Math.min(newLeft, innerWidth - currentDragNote.duration));
+      currentDragNote.start = newLeft;
+      
+      let newTop = e.clientY - rect.top - dragOffsetY;
+      let newPitch = Math.round((innerHeight - newTop) / keyHeight - 1);
+      newPitch = Math.max(0, Math.min(newPitch, keysCount - 1));
+      currentDragNote.pitch = newPitch;
+      
+      currentDragNote.div.style.left = currentDragNote.start + 'px';
+      currentDragNote.div.style.top = (innerHeight - (currentDragNote.pitch + 1) * keyHeight) + 'px';
+      
+      drawCurve();
+      drawPhonemes();
+    }
+
+    function endDragNote() {
+      currentDragNote = null;
+      document.removeEventListener('mousemove', dragNote);
+      document.removeEventListener('mouseup', endDragNote);
+    }
+
+    function resizeNote(e) {
+      if (!currentResizeNote) return;
+      
+      let deltaX = e.clientX - resizeStartX;
+      let newDuration = initialNoteDuration + deltaX;
+      newDuration = Math.max(20, newDuration);
+      newDuration = Math.min(newDuration, innerWidth - currentResizeNote.start);
+      
+      currentResizeNote.duration = newDuration;
+      currentResizeNote.div.style.width = newDuration + 'px';
+      
+      drawCurve();
+      drawPhonemes();
+    }
+
+    function endResizeNote() {
+      currentResizeNote = null;
+      document.removeEventListener('mousemove', resizeNote);
+      document.removeEventListener('mouseup', endResizeNote);
+    }
+
+    // --------------------------
+    // Pitch Curve Rendering
+    // --------------------------
+    function drawCurve() {
+      const svg = document.querySelector('#svgOverlay svg');
+      svg.innerHTML = "";
+      
+      let globalPoints = [];
+      
+      // Create global control points
+      notes.forEach(note => {
+        const baseY = innerHeight - (note.pitch + 1) * keyHeight + keyHeight/2;
+        note.pitchCurve.forEach((pt, i) => {
+          globalPoints.push({
+            x: note.start + pt.time,
+            y: baseY - pt.deviation,
+            note: note,
+            controlIndex: i
+          });
+        });
+      });
+      
+      if (globalPoints.length < 2) return;
+      
+      // Draw smooth curve
+      const d = getSmoothPath(globalPoints);
+      const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
+      path.classList.add("pitch-curve");
+      path.setAttribute("d", d);
+      svg.appendChild(path);
+      
+      // Draw control points
+      globalPoints.forEach(pt => {
+        const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+        circle.setAttribute("cx", pt.x);
+        circle.setAttribute("cy", pt.y);
+        circle.setAttribute("r", 4);
+        circle.setAttribute("fill", "#ff0000");
+        circle.classList.add("control-point");
+        circle.style.pointerEvents = "auto";
+        circle.addEventListener("mousedown", (e) => startCPDrag(e, { note: pt.note, controlIndex: pt.controlIndex }));
+        svg.appendChild(circle);
+      });
+    }
+
+    function getSmoothPath(points) {
+      if (points.length < 2) return "";
+      
+      let d = "M " + points[0].x + " " + points[0].y;
+      
+      for (let i = 0; i < points.length - 1; i++) {
+        let p1 = points[i];
+        let p2 = points[i + 1];
+        
+        // Simple line for now, can be improved with bezier curves
+        d += " L " + p2.x + " " + p2.y;
+      }
+      
+      return d;
+    }
+
+    // --------------------------
+    // Control Point Dragging
+    // --------------------------
+    let currentDraggedCP = null;
+
+    function startCPDrag(e, cpIdentifier) {
+      currentDraggedCP = cpIdentifier;
+      document.addEventListener("mousemove", dragCP);
+      document.addEventListener("mouseup", endCPDrag);
+      e.stopPropagation();
+    }
+
+    function dragCP(e) {
+      if (!currentDraggedCP) return;
+      
+      const rect = document.querySelector('#svgOverlay svg').getBoundingClientRect();
+      let newX = e.clientX - rect.left;
+      let newY = e.clientY - rect.top;
+      
+      newX = Math.max(0, Math.min(newX, innerWidth));
+      newY = Math.max(0, Math.min(newY, innerHeight));
+      
+      const { note, controlIndex } = currentDraggedCP;
+      const newRelTime = newX - note.start;
+      const baseY = innerHeight - (note.pitch + 1) * keyHeight + keyHeight/2;
+      const newRelDeviation = baseY - newY;
+      
+      note.pitchCurve[controlIndex].time = newRelTime;
+      note.pitchCurve[controlIndex].deviation = newRelDeviation;
+      
+      drawCurve();
+    }
+
+    function endCPDrag() {
+      currentDraggedCP = null;
+      document.removeEventListener("mousemove", dragCP);
+      document.removeEventListener("mouseup", endCPDrag);
+    }
+
+    // --------------------------
+    // Phoneme Display
+    // --------------------------
+    function drawPhonemes() {
+      const phonemeLayer = document.getElementById("phonemeLayer");
+      phonemeLayer.innerHTML = "";
+      
+      notes.forEach(note => {
+        if (!note.phonemes || note.phonemes.length === 0) return;
+        
+        const notePhDiv = document.createElement("div");
+        notePhDiv.className = "phoneme-note";
+        notePhDiv.style.left = note.start + "px";
+        notePhDiv.style.width = note.duration + "px";
+        
+        const totalPhDuration = note.phonemes.reduce((s, ph) => s + ph.duration, 0);
+        
+        note.phonemes.forEach(ph => {
+          const phDiv = document.createElement("div");
+          phDiv.className = "phoneme-seg";
+          const width = totalPhDuration > 0 ? (ph.duration / totalPhDuration) * note.duration : note.duration;
+          phDiv.style.width = width + "px";
+          phDiv.textContent = ph.label;
+          notePhDiv.appendChild(phDiv);
+        });
+        
+        phonemeLayer.appendChild(notePhDiv);
+      });
+    }
+
+    // --------------------------
+    // Info Display
+    // --------------------------
+    function updateInfoDisplay() {
+      const infoDiv = document.getElementById('infoDisplay');
+      
+      if (!projectInfo) {
+        infoDiv.textContent = "No project loaded";
+        return;
+      }
+      
+      let info = `Project: ${projectInfo.name}\n`;
+      info += `Resolution: ${projectInfo.resolution} ticks/beat\n`;
+      info += `BPM: ${projectInfo.bpm}\n`;
+      info += `Notes: ${notes.length}\n`;
+      
+      if (phonemeData) {
+        info += `Phonemes: ${phonemeData.length}\n`;
+      }
+      
+      info += '\nNotes:\n';
+      notes.forEach((note, i) => {
+        info += `${i + 1}. ${note.lyric} (MIDI ${note.pitch + 21}, pos: ${(note.start * ticksPerPixel).toFixed(0)} ticks)\n`;
+      });
+      
+      infoDiv.textContent = info;
+    }
+
+    // --------------------------
+    // Initialize
+    // --------------------------
+    drawGrid();
+    drawPiano();
+    updateInfoDisplay();
+  </script>
+</body>
+</html>
