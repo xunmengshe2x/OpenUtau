@@ -105,8 +105,8 @@ export default function CopilotPage() {
 
   const handleUSTXUpdate = (newData: USTXData) => {
     setUstxData(newData);
-    // Auto-render when USTX is updated
-    autoRenderFullSong(newData);
+    // Auto-render disabled for copilot mode - user can manually render if needed
+    // autoRenderFullSong(newData);
   };
 
   const autoRenderFullSong = async (data: USTXData) => {
@@ -153,8 +153,8 @@ export default function CopilotPage() {
         if (response.ok) {
           const templateData = await response.json();
           setUstxData(templateData);
-          // Auto-render when template is loaded
-          autoRenderFullSong(templateData);
+          // Auto-render disabled for copilot mode - user can manually render if needed
+          // autoRenderFullSong(templateData);
         }
       } catch (error) {
         console.error('Error loading template:', error);
@@ -176,8 +176,8 @@ export default function CopilotPage() {
         const content = e.target?.result as string;
         const parsedData = yaml.load(content) as USTXData;
         setUstxData(parsedData);
-        // Auto-render when file is uploaded
-        autoRenderFullSong(parsedData);
+        // Auto-render disabled for copilot mode - user can manually render if needed
+        // autoRenderFullSong(parsedData);
       } catch (error) {
         console.error('Error parsing USTX file:', error);
       }
