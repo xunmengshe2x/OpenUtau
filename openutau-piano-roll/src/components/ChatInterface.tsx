@@ -24,7 +24,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
   onUSTXUpdate, 
   onTemplateSelect 
 }) => {
-  const { messages, sendMessage, clearMessages, isLoading } = useStreamingChat(ustxData, onUSTXUpdate);
+  const { messages, sendMessage, clearMessages, isLoading, continueBatchOperation } = useStreamingChat(ustxData, onUSTXUpdate);
   const [inputValue, setInputValue] = useState('');
   const [selectedTemplate, setSelectedTemplate] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -103,31 +103,49 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
         </div>
 
         {/* Quick Actions */}
-        <div className="flex flex-wrap gap-2">
-          <motion.button
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
-            onClick={() => setInputValue('Change the first verse to be about snow')}
-            className="px-3 py-1 bg-blue-600 text-blue-100 rounded-full text-xs hover:bg-blue-500 transition-colors"
-          >
-            Change lyrics
-          </motion.button>
-          <motion.button
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
-            onClick={() => setInputValue('Increase the pitch of the chorus')}
-            className="px-3 py-1 bg-green-600 text-green-100 rounded-full text-xs hover:bg-green-500 transition-colors"
-          >
-            Adjust pitch
-          </motion.button>
-          <motion.button
-            whileHover={{ scale: 1.05 }}
-            whileTap={{ scale: 0.95 }}
-            onClick={() => setInputValue('Add more vibrato to the ending')}
-            className="px-3 py-1 bg-purple-600 text-purple-100 rounded-full text-xs hover:bg-purple-500 transition-colors"
-          >
-            Add vibrato
-          </motion.button>
+        <div className="flex flex-wrap gap-2 justify-between items-center">
+          <div className="flex flex-wrap gap-2">
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => setInputValue('Change the first verse to be about snow')}
+              className="px-3 py-1 bg-blue-600 text-blue-100 rounded-full text-xs hover:bg-blue-500 transition-colors"
+            >
+              Change lyrics
+            </motion.button>
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => setInputValue('Increase the pitch of the chorus')}
+              className="px-3 py-1 bg-green-600 text-green-100 rounded-full text-xs hover:bg-green-500 transition-colors"
+            >
+              Adjust pitch
+            </motion.button>
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={() => setInputValue('Add more vibrato to the ending')}
+              className="px-3 py-1 bg-purple-600 text-purple-100 rounded-full text-xs hover:bg-purple-500 transition-colors"
+            >
+              Add vibrato
+            </motion.button>
+          </div>
+          
+          {/* Clear Chat Button */}
+          {messages.length > 0 && (
+            <motion.button
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+              onClick={clearMessages}
+              className="px-3 py-1 bg-red-600 text-red-100 rounded-full text-xs hover:bg-red-500 transition-colors flex items-center gap-1"
+              title="Clear chat history"
+            >
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+              </svg>
+              Clear
+            </motion.button>
+          )}
         </div>
       </motion.div>
 
@@ -208,6 +226,51 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                           />
                         )}
                       </div>
+                      
+                      {/* Batch Operation Continue Buttons */}
+                      {message.batchOperation && !message.isStreaming && (
+                        <motion.div
+                          initial={{ opacity: 0, y: 10 }}
+                          animate={{ opacity: 1, y: 0 }}
+                          className="mt-4 p-4 bg-gray-700 border border-gray-600 rounded-lg"
+                        >
+                          <div className="flex items-center justify-between mb-3">
+                            <div>
+                              <h4 className="text-sm font-semibold text-white">Batch Operation Progress</h4>
+                              <p className="text-xs text-gray-300">
+                                Completed {message.batchOperation.completed_batch} batches of {message.batchOperation.total_verses} total verses
+                              </p>
+                            </div>
+                            <div className="text-xs text-gray-400">
+                              Next: verses {message.batchOperation.next_batch.start}-{message.batchOperation.next_batch.end}
+                            </div>
+                          </div>
+                          
+                          <div className="flex gap-2">
+                            <motion.button
+                              whileHover={{ scale: 1.02 }}
+                              whileTap={{ scale: 0.98 }}
+                              onClick={() => continueBatchOperation(message.batchOperation)}
+                              disabled={isLoading}
+                              className="flex-1 px-3 py-2 bg-gradient-to-r from-blue-500 to-purple-500 text-white rounded-md hover:from-blue-600 hover:to-purple-600 disabled:opacity-50 disabled:cursor-not-allowed transition-all text-sm font-medium"
+                            >
+                              {isLoading ? 'Processing...' : 'Continue Next Batch'}
+                            </motion.button>
+                            
+                            <motion.button
+                              whileHover={{ scale: 1.02 }}
+                              whileTap={{ scale: 0.98 }}
+                              onClick={() => {
+                                // Stop batch operation - user can continue later if needed
+                              }}
+                              disabled={isLoading}
+                              className="px-3 py-2 bg-gray-600 text-gray-200 rounded-md hover:bg-gray-500 disabled:opacity-50 disabled:cursor-not-allowed transition-all text-sm"
+                            >
+                              Stop
+                            </motion.button>
+                          </div>
+                        </motion.div>
+                      )}
                     </div>
                   ) : (
                     <div className="prose prose-lg max-w-none">

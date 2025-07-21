@@ -4,7 +4,8 @@ import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import ChatInterface from './ChatInterface';
 import LyricsDisplay from './LyricsDisplay';
-import { USTXData, USTXNote, PhonemeTiming } from '@/types/openutau';
+import { USTXData, USTXNote, PhonemeTiming, DetailedPhonemeTiming } from '@/types/openutau';
+import { usePhonemeProcessing } from '@/hooks/usePhonemeProcessing';
 
 interface CopilotLayoutProps {
   ustxData?: USTXData;
@@ -14,6 +15,7 @@ interface CopilotLayoutProps {
   onUSTXUpdate?: (newData: USTXData) => void;
   onNoteSelect?: (note: USTXNote) => void;
   onTemplateSelect?: (templateName: string) => void;
+  singerId?: string; // Add singer ID for phoneme processing
 }
 
 const CopilotLayout: React.FC<CopilotLayoutProps> = ({
@@ -23,12 +25,16 @@ const CopilotLayout: React.FC<CopilotLayoutProps> = ({
   isPlaying,
   onUSTXUpdate,
   onNoteSelect,
-  onTemplateSelect
+  onTemplateSelect,
+  singerId
 }) => {
   const [leftPanelWidth, setLeftPanelWidth] = useState(50); // Percentage
   const [isDragging, setIsDragging] = useState(false);
   const [showCopilot, setShowCopilot] = useState(false);
   const [activePanel, setActivePanel] = useState<'chat' | 'lyrics'>('chat');
+  
+  // Initialize phoneme processing hook
+  const { phonemeData: processedPhonemes, isProcessing, processUSTX, error } = usePhonemeProcessing();
 
   // Auto-enable copilot mode when USTX data is loaded
   useEffect(() => {
@@ -36,6 +42,22 @@ const CopilotLayout: React.FC<CopilotLayoutProps> = ({
       setShowCopilot(true);
     }
   }, [ustxData]);
+
+  // Process phonemes when USTX data is loaded
+  useEffect(() => {
+    console.log('PHONEME PROCESSING CHECK:', {
+      hasUstxData: !!ustxData,
+      singerId,
+      hasProcessedPhonemes: !!processedPhonemes,
+      isProcessing,
+      error
+    });
+    
+    if (ustxData && !processedPhonemes && !isProcessing) {
+      console.log('Processing phonemes for USTX data...');
+      processUSTX(ustxData, 'default'); // Use default since we don't need singer-specific processing
+    }
+  }, [ustxData, singerId, processedPhonemes, processUSTX]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
     setIsDragging(true);
@@ -211,9 +233,46 @@ const CopilotLayout: React.FC<CopilotLayoutProps> = ({
         </div>
         
         <div className="flex-1 min-h-0">
+          {/* Show phoneme processing status */}
+          {isProcessing && (
+            <motion.div
+              initial={{ opacity: 0, y: -20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="bg-blue-900 text-white p-3 text-sm flex items-center space-x-2"
+            >
+              <motion.div
+                animate={{ rotate: 360 }}
+                transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                className="w-4 h-4 border-2 border-white border-t-transparent rounded-full"
+              />
+              <span>Processing phonemes for accurate phrase detection...</span>
+            </motion.div>
+          )}
+          
+          {/* Show phoneme processing error */}
+          {error && (
+            <motion.div
+              initial={{ opacity: 0, y: -20 }}
+              animate={{ opacity: 1, y: 0 }}
+              className="bg-red-900 text-white p-3 text-sm"
+            >
+              Phoneme processing failed: {error}
+            </motion.div>
+          )}
+          
           <LyricsDisplay
             ustxData={ustxData}
-            phonemeData={phonemeData}
+            phonemeData={(() => {
+              const data = processedPhonemes || phonemeData;
+              console.log('COPILOT LAYOUT: Passing phoneme data to LyricsDisplay:', {
+                hasProcessedPhonemes: !!processedPhonemes,
+                hasPhonemeData: !!phonemeData,
+                finalData: !!data,
+                processingError: error,
+                isProcessing: isProcessing
+              });
+              return data;
+            })()}
             currentTime={currentTime}
             isPlaying={isPlaying}
             onNoteClick={onNoteSelect}

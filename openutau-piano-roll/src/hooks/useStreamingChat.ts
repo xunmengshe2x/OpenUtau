@@ -10,6 +10,16 @@ interface Message {
   isStreaming?: boolean;
   toolExecution?: any;
   toolResult?: any;
+  batchOperation?: {
+    completed_batch: number;
+    next_batch: {
+      start: number;
+      end: number;
+      theme: string;
+    };
+    total_verses: number;
+    original_request: string;
+  };
 }
 
 export function useStreamingChat(ustxData?: USTXData, onUSTXUpdate?: (newData: USTXData) => void) {
@@ -65,6 +75,10 @@ export function useStreamingChat(ustxData?: USTXData, onUSTXUpdate?: (newData: U
     setIsLoading(true);
 
     try {
+      // Create AbortController with 10-minute timeout for large operations
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10 * 60 * 1000); // 10 minutes
+      
       const response = await fetch('/api/chat', {
         method: 'POST',
         headers: {
@@ -76,7 +90,10 @@ export function useStreamingChat(ustxData?: USTXData, onUSTXUpdate?: (newData: U
           model,
           lyricsMetadata,
         }),
+        signal: controller.signal,
       });
+      
+      clearTimeout(timeoutId); // Clear timeout if request completes
 
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
@@ -112,11 +129,30 @@ export function useStreamingChat(ustxData?: USTXData, onUSTXUpdate?: (newData: U
               
               if (parsed.content) {
                 setMessages(prev => 
-                  prev.map(msg => 
-                    msg.id === assistantMessage.id 
-                      ? { ...msg, content: msg.content + parsed.content }
-                      : msg
-                  )
+                  prev.map(msg => {
+                    if (msg.id === assistantMessage.id) {
+                      const newContent = msg.content + parsed.content;
+                      
+                      // Check if content contains batch operation JSON
+                      let batchOperation = undefined;
+                      try {
+                        // Look for JSON in the content that indicates batch operation
+                        const jsonMatch = newContent.match(/\{"batch_operation":\s*true[^}]*\}/);
+                        if (jsonMatch) {
+                          batchOperation = JSON.parse(jsonMatch[0]);
+                        }
+                      } catch (e) {
+                        // Not a batch operation, continue normally
+                      }
+                      
+                      return { 
+                        ...msg, 
+                        content: newContent,
+                        batchOperation 
+                      };
+                    }
+                    return msg;
+                  })
                 );
               }
               
@@ -151,6 +187,7 @@ export function useStreamingChat(ustxData?: USTXData, onUSTXUpdate?: (newData: U
                   resultKeys: Object.keys(result)
                 });
 
+                // Handle single verse updates
                 if (ustxData && onUSTXUpdate && result.verse_number && result.new_lyrics) {
                   try {
                     console.log('Creating USTXLyricsManager with data:', {
@@ -170,12 +207,49 @@ export function useStreamingChat(ustxData?: USTXData, onUSTXUpdate?: (newData: U
                     console.error('Error updating USTX locally:', error);
                     // Continue without crashing - show the result even if USTX update fails
                   }
+                }
+                // Handle multi-verse updates (change_multiple_verses, edit_word_in_multiple_verses)
+                else if (ustxData && onUSTXUpdate && result.results && Array.isArray(result.results)) {
+                  try {
+                    console.log('Processing multi-verse update:', {
+                      toolName,
+                      resultsCount: result.results.length,
+                      hasVoiceParts: !!ustxData.voice_parts,
+                      voicePartsCount: ustxData.voice_parts?.length
+                    });
+                    
+                    // Extract verse updates from results array
+                    const verseUpdates = result.results
+                      .filter((r: any) => r.verse_number && r.new_lyrics)
+                      .map((r: any) => ({
+                        verse_number: r.verse_number,
+                        new_lyrics: r.new_lyrics
+                      }));
+                    
+                    if (verseUpdates.length > 0) {
+                      const lyricsManager = new USTXLyricsManager(ustxData);
+                      
+                      // Use streaming update to update UI progressively
+                      const finalUSTX = lyricsManager.updateMultipleVersesStreaming(
+                        verseUpdates,
+                        (updatedUSTX, verseNumber, progress) => {
+                          console.log(`Verse ${verseNumber} updated (${progress.current}/${progress.total}), calling callback`);
+                          onUSTXUpdate(updatedUSTX);
+                        }
+                      );
+                      
+                      console.log('Multi-verse streaming USTX update completed');
+                    }
+                  } catch (error) {
+                    console.error('Error updating multi-verse USTX locally:', error);
+                    // Continue without crashing - show the result even if USTX update fails
+                  }
                 } else {
                   console.log('Skipping USTX update - missing requirements:', { 
                     hasUSTXData: !!ustxData,
                     hasCallback: !!onUSTXUpdate,
-                    hasVerseNumber: !!result.verse_number,
-                    hasNewLyrics: !!result.new_lyrics
+                    singleVerse: { hasVerseNumber: !!result.verse_number, hasNewLyrics: !!result.new_lyrics },
+                    multiVerse: { hasResults: !!result.results, isArray: Array.isArray(result.results) }
                   });
                 }
                 
@@ -211,13 +285,20 @@ export function useStreamingChat(ustxData?: USTXData, onUSTXUpdate?: (newData: U
                     `*Syllables preserved: ${result.syllables_preserved ? '✓' : '✗'}*`;
                 }
                 
+                // Check for batch operation metadata in tool result
+                let batchOperation = undefined;
+                if (result.batch_operation) {
+                  batchOperation = result.batch_operation;
+                }
+                
                 setMessages(prev => 
                   prev.map(msg => 
                     msg.id === assistantMessage.id 
                       ? { 
                           ...msg, 
                           content: msg.content + successMessage,
-                          toolResult: parsed.tool_result
+                          toolResult: parsed.tool_result,
+                          batchOperation
                         }
                       : msg
                   )
@@ -260,10 +341,16 @@ export function useStreamingChat(ustxData?: USTXData, onUSTXUpdate?: (newData: U
     setMessages([]);
   }, []);
 
+  const continueBatchOperation = useCallback(async (batchInfo: any, model?: string) => {
+    const continueMessage = `Continue batch operation: change verses ${batchInfo.next_batch.start}-${batchInfo.next_batch.end} to theme "${batchInfo.next_batch.theme}"`;
+    return sendMessage(continueMessage, model);
+  }, [sendMessage]);
+
   return {
     messages,
     sendMessage,
     clearMessages,
     isLoading,
+    continueBatchOperation,
   };
 }

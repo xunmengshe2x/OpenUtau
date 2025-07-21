@@ -182,6 +182,35 @@ export interface PhonemeTiming {
   TimeMs: number;
 }
 
+// Enhanced phoneme timing data for phrase boundary detection
+export interface DetailedPhonemeTiming {
+  partName: string;
+  noteIndex: number;
+  phoneme: string;
+  position: number;        // Position in ticks
+  duration: number;        // Duration in ticks  
+  timeMs: number;          // Time in milliseconds
+  endTimeMs: number;       // End time in milliseconds
+  parentNote: {
+    lyric: string;
+    tone: number;
+    position: number;
+    duration: number;
+  };
+}
+
+// Phoneme-based phrase detection results
+export interface PhonemePhrase {
+  phraseNumber: number;
+  startNoteIndex: number;
+  endNoteIndex: number;
+  startTimeMs: number;
+  endTimeMs: number;
+  lyrics: string;
+  phonemes: DetailedPhonemeTiming[];
+  gapAfterMs?: number;     // Gap to next phrase in milliseconds
+}
+
 // UI/Display types
 export interface Viewport {
   startTick: number;

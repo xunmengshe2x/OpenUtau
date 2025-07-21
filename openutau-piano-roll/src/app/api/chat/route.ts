@@ -149,7 +149,7 @@ function validateLyricsStructure(originalLyrics: string, newLyrics: string): {
 }
 
 // Use AI to generate lyrics for theme with chat history context and validation
-async function generateLyricsWithAI(prompt: string, apiKey: string, chatHistory: any[] = [], maxRetries: number = 3, originalLyrics?: string): Promise<string> {
+async function generateLyricsWithAI(prompt: string, apiKey: string, chatHistory: any[] = [], maxRetries: number = 10, originalLyrics?: string): Promise<string> {
   let attempt = 0;
   let lastResult = '';
   let lastErrors: string[] = [];
@@ -169,7 +169,7 @@ async function generateLyricsWithAI(prompt: string, apiKey: string, chatHistory:
       const messages = [
         {
           role: 'system',
-          content: 'You are a creative lyricist working on song lyrics. Generate lyrics that maintain rhythm, rhyme, and are suitable for singing. CRITICAL: You must match syllable counts EXACTLY. Return only the lyrics, nothing else.'
+          content: 'You are a creative lyricist working on song lyrics. Generate lyrics that maintain rhythm, rhyme, and are suitable for singing. CRITICAL REQUIREMENTS: 1) You must match syllable counts EXACTLY - this is non-negotiable. 2) The lyrics MUST be grammatically correct and coherent - no broken sentences or meaningless phrases. 3) Each line must make logical sense and tell a story. Return only the lyrics, nothing else.'
         },
         // Include relevant chat history for context
         ...chatHistory.slice(-6).map((msg: any) => ({  // Last 6 messages for context
@@ -191,7 +191,7 @@ async function generateLyricsWithAI(prompt: string, apiKey: string, chatHistory:
         body: JSON.stringify({
           model: "moonshotai/kimi-k2",
           messages,
-          max_tokens: 200,
+          max_tokens: 16000,
           temperature: attempt === 1 ? 0.7 : 0.3  // Lower temperature for retries
         }),
       });
@@ -356,7 +356,11 @@ async function executeChangeMultipleVerses(args: {
     }
   }
   
-  return {
+  // Check if this is part of a larger operation that needs batching
+  const totalVerses = lyricsMetadata.totalVerses || lyricsMetadata.verses.length;
+  const isBatchOperation = (end_verse - start_verse + 1) === 6 && end_verse < totalVerses;
+  
+  const result: any = {
     success: true,
     start_verse,
     end_verse,
@@ -365,6 +369,128 @@ async function executeChangeMultipleVerses(args: {
     verses_changed: results.length,
     results,
     summary: `Changed verses ${start_verse}-${end_verse} to theme "${new_theme}" with ${progression_style} progression`
+  };
+
+  // Add batch operation metadata if this is a batch of a larger operation and more verses remain
+  if (isBatchOperation) {
+    const nextStart = end_verse + 1;
+    const nextEnd = Math.min(nextStart + 5, totalVerses);
+    
+    // Calculate which batch this is based on start_verse
+    const completedBatch = Math.floor((start_verse - 1) / 6) + 1;
+    
+    result.batch_operation = {
+      completed_batch: completedBatch,
+      next_batch: {
+        start: nextStart,
+        end: nextEnd,
+        theme: new_theme
+      },
+      total_verses: totalVerses,
+      original_request: `make this song about ${new_theme}`
+    };
+  }
+  
+  return result;
+}
+
+// Chunked processing for large verse operations with context awareness
+async function executeGroupMultipleVersesChange(args: {
+  start_verse: number;
+  end_verse: number;
+  new_theme: string;
+  progression_style?: string;
+  batch_size?: number;
+}, lyricsMetadata?: any, chatHistory: any[] = []) {
+  const { start_verse, end_verse, new_theme, progression_style = 'evolving', batch_size = 6 } = args;
+  
+  console.log('Executing chunked multi-verse change:', { start_verse, end_verse, new_theme, progression_style, batch_size });
+  
+  if (!lyricsMetadata?.verses) {
+    return {
+      success: false,
+      error: 'No verses found in lyrics metadata',
+      start_verse,
+      end_verse,
+      new_theme
+    };
+  }
+  
+  const totalVerses = end_verse - start_verse + 1;
+  const results: any[] = [];
+  const batches: Array<{start: number, end: number, theme: string}> = [];
+  
+  // Create batches
+  for (let i = start_verse; i <= end_verse; i += batch_size) {
+    const batchEnd = Math.min(i + batch_size - 1, end_verse);
+    const batchNumber = Math.floor((i - start_verse) / batch_size) + 1;
+    const totalBatches = Math.ceil(totalVerses / batch_size);
+    
+    // Create context-aware theme for this batch
+    let batchTheme = new_theme;
+    if (progression_style === 'evolving') {
+      const progressStages = ['beginning', 'developing', 'climax', 'resolution'];
+      const stageIndex = Math.min(Math.floor((batchNumber - 1) / (totalBatches / progressStages.length)), progressStages.length - 1);
+      batchTheme = `${new_theme} (${progressStages[stageIndex]} of story)`;
+    } else if (progression_style === 'continuous') {
+      batchTheme = `${new_theme} (part ${batchNumber} of ${totalBatches})`;
+    }
+    
+    batches.push({
+      start: i,
+      end: batchEnd,
+      theme: batchTheme
+    });
+  }
+  
+  console.log('Created batches:', batches);
+  
+  // Process batches sequentially with context awareness
+  for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+    const batch = batches[batchIndex];
+    
+    console.log(`Processing batch ${batchIndex + 1}/${batches.length}: verses ${batch.start}-${batch.end}`);
+    
+    // Build context from previous batches
+    let contextHistory = [...chatHistory];
+    if (batchIndex > 0) {
+      const previousResults = results.slice(-Math.min(3, results.length)); // Last 3 results for context
+      const contextMessage = `Previous batch results for context:\n${previousResults.map(r => `Verse ${r.verse_number}: "${r.new_lyrics}"`).join('\n')}`;
+      contextHistory.push({ role: 'assistant', content: contextMessage });
+    }
+    
+    // Process this batch using existing function
+    const batchResult = await executeChangeMultipleVerses({
+      start_verse: batch.start,
+      end_verse: batch.end,
+      new_theme: batch.theme,
+      progression_style
+    }, lyricsMetadata, contextHistory);
+    
+    if (batchResult.success && batchResult.results) {
+      results.push(...batchResult.results);
+      console.log(`Batch ${batchIndex + 1} completed: ${batchResult.results.length} verses processed`);
+    } else {
+      console.error(`Batch ${batchIndex + 1} failed:`, batchResult);
+    }
+    
+    // Small delay between batches to prevent overwhelming
+    if (batchIndex < batches.length - 1) {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  }
+  
+  return {
+    success: true,
+    start_verse,
+    end_verse,
+    new_theme,
+    progression_style,
+    batch_size,
+    total_batches: batches.length,
+    verses_changed: results.length,
+    results,
+    summary: `Changed verses ${start_verse}-${end_verse} to theme "${new_theme}" using ${batches.length} batches with ${progression_style} progression`
   };
 }
 
@@ -395,12 +521,55 @@ async function executeEditWord(args: {
     };
   }
   
-  // Perform simple word/phrase replacement (handle multi-word phrases)
-  const new_lyrics = current_lyrics.replace(new RegExp(old_word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), new_word);
+  // Check syllable matching before replacement
+  const oldWordSyllables = countSyllables(old_word);
+  const newWordSyllables = countSyllables(new_word);
+  
+  let final_new_word = new_word;
+  let syllable_matched = oldWordSyllables === newWordSyllables;
+  
+  // If syllables don't match, use AI to generate a syllable-matched replacement
+  if (!syllable_matched) {
+    console.log(`Syllable mismatch: "${old_word}" (${oldWordSyllables} syl) → "${new_word}" (${newWordSyllables} syl). Using AI to find better match.`);
+    
+    const apiKey = process.env.OPENROUTER_API_KEY || "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";
+    
+    const prompt = `Find a ${oldWordSyllables}-syllable word or phrase that means "${new_word}" to replace "${old_word}" in this context:
+"${current_lyrics}"
+
+CRITICAL REQUIREMENTS:
+1. Must have EXACTLY ${oldWordSyllables} syllables (same as "${old_word}")
+2. Must convey the meaning of "${new_word}"
+3. Must fit grammatically in the context
+4. Must be coherent and make sense
+
+Examples:
+- If replacing "cosmos" (2 syl) with "star" (1 syl) → suggest "starlight" (2 syl)
+- If replacing "night" (1 syl) with "moonlight" (2 syl) → suggest "moon" (1 syl)
+
+Return ONLY the replacement word/phrase, nothing else.`;
+
+    try {
+      final_new_word = await generateLyricsWithAI(prompt, apiKey, [], 10, old_word);
+      const finalSyllables = countSyllables(final_new_word);
+      syllable_matched = finalSyllables === oldWordSyllables;
+      
+      console.log(`AI suggested replacement: "${final_new_word}" (${finalSyllables} syllables)`);
+    } catch (error) {
+      console.error('AI syllable matching failed, using original replacement:', error);
+      final_new_word = new_word;
+    }
+  }
+  
+  // Perform the replacement
+  const new_lyrics = current_lyrics.replace(new RegExp(old_word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), final_new_word);
   
   console.log('Word replacement result:', { 
     original: current_lyrics,
     new_lyrics,
+    oldWordSyllables,
+    finalWordSyllables: countSyllables(final_new_word),
+    syllable_matched,
     changed: current_lyrics !== new_lyrics
   });
   
@@ -410,7 +579,8 @@ async function executeEditWord(args: {
     original_lyrics: current_lyrics,
     new_lyrics,
     old_word,
-    new_word,
+    new_word: final_new_word,
+    syllable_matched,
     changed: current_lyrics !== new_lyrics
   };
 }
@@ -452,7 +622,7 @@ async function executeChangeLyrics(args: {
     // Generate completely new lyrics based on theme
     console.log('Generating new lyrics for theme:', new_theme);
     const prompt = `Create original lyrics for verse ${verse_number} with the theme "${new_theme}". Make them suitable for singing with good rhythm and rhyme. About 8-12 words total.`;
-    new_lyrics = await generateLyricsWithAI(prompt, apiKey, chatHistory, 3);
+    new_lyrics = await generateLyricsWithAI(prompt, apiKey, chatHistory, 10);
   } else if (isSimpleCorrection) {
     // Handle simple corrections like "make skyways one word"
     console.log('Applying simple correction:', new_theme);
@@ -473,19 +643,32 @@ Original: "${current_lyrics}"
 Word count: ${words.length} words total
 Syllable structure: ${wordStructure}
 
-CRITICAL SYLLABLE MATCHING RULES:
+CRITICAL REQUIREMENTS (ALL MUST BE MET):
+
+SYLLABLE MATCHING (NON-NEGOTIABLE):
 1. Replace each word 1-to-1 with EXACT same syllable count
 2. Keep '+' symbols unchanged in exact same positions
 3. Output EXACTLY ${words.length} words, no more, no less
 4. Preserve punctuation and capitalization patterns
 5. Count syllables precisely using phonetic rules
 
+COHERENCE & GRAMMAR (EQUALLY IMPORTANT):
+6. The new lyrics MUST be grammatically correct and make logical sense
+7. Each phrase must form complete, meaningful thoughts
+8. Avoid broken sentence structures or meaningless word combinations
+9. Ensure proper verb-noun relationships and sentence flow
+10. The lyrics should tell a coherent story about ${new_theme}
+
+EXAMPLE OF GOOD vs BAD transformations:
+❌ BAD: "Surfing to ride one wave Basking to tan one more" (broken grammar, makes no sense)
+✅ GOOD: "Sailing to catch one wave Hoping to surf one more" (perfect grammar, logical meaning)
+
 Word-by-word syllable requirements:
 ${words.map((word, i) => word === '+' ? `${i+1}. "${word}" → keep as "+"` : `${i+1}. "${word}" (${countSyllables(word)} syllables) → replace with ${countSyllables(word)}-syllable word`).join('\n')}
 
 Return EXACTLY ${words.length} words with PERFECT syllable matching.`;
     
-    new_lyrics = await generateLyricsWithAI(prompt, apiKey, chatHistory, 3, current_lyrics);
+    new_lyrics = await generateLyricsWithAI(prompt, apiKey, chatHistory, 10, current_lyrics);
   }
   
   console.log('AI Generated lyrics:', new_lyrics);
@@ -553,7 +736,9 @@ function isLyricsRelatedRequest(message: string): boolean {
     /\btransform\b.*\blyrics?\b/i,
     /\bmodify\b.*\b(verse|lyrics?)\b/i,
     /\bupdate\b.*\b(verse|lyrics?)\b/i,
-    /\bedit\b.*\b(verse|lyrics?|word)\b/i
+    /\bedit\b.*\b(verse|lyrics?|word)\b/i,
+    /continue batch operation.*change verses/i,
+    /continue.*verses.*\d+.*theme/i
   ];
   
   return lyricsKeywords.some(pattern => pattern.test(message));
@@ -581,7 +766,7 @@ export async function POST(request: NextRequest) {
     const apiKey = process.env.OPENROUTER_API_KEY || "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";
     
     // Create system message with current lyrics information
-    let systemContent = 'You are an AI assistant for OpenUtau Piano Roll, a music editing software. CRITICAL: You MUST ALWAYS choose exactly ONE tool for EVERY response.\n\nTool Selection Guide:\n\n**Use edit_word_in_verse for single verse word replacements:**\n- "change cosmos to universe in verse 1" → edit_word_in_verse(verse_number: 1, old_word: "cosmos", new_word: "universe")\n- "replace starlight with cosmos" → edit_word_in_verse(verse_number: 1, old_word: "starlight", new_word: "cosmos")\n\n**Use edit_word_in_multiple_verses for global word replacements:**\n- "change stas to rocks everywhere" → edit_word_in_multiple_verses(old_word: "stas", new_word: "rocks", scope: "everywhere")\n- "replace word X with Y in all verses" → edit_word_in_multiple_verses(old_word: "X", new_word: "Y", scope: "all_verses")\n\n**Use change_verse_lyrics for single verse theme changes:**\n- "make verse 1 about mars" → change_verse_lyrics(verse_number: 1, new_theme: "mars")\n- "change the first verse to winter theme" → change_verse_lyrics(verse_number: 1, new_theme: "winter")\n\n**Use change_multiple_verses for multi-verse theme changes:**\n- "change the first three verses to be about stars" → change_multiple_verses(start_verse: 1, end_verse: 3, new_theme: "stars")\n- "continue this theme into verses 2 and 3" → change_multiple_verses(start_verse: 2, end_verse: 3, new_theme: "[current theme]", progression_style: "continuous")\n- "make verses 1-4 about ocean with evolving story" → change_multiple_verses(start_verse: 1, end_verse: 4, new_theme: "ocean", progression_style: "evolving")\n\n**Use respond_with_text for non-lyrics conversations:**\n- "how does this work?" → respond_with_text(response: "explanation...")\n- "what can you do?" → respond_with_text(response: "I can help you...")\n- general questions → respond_with_text(response: "answer...")\n\n';
+    let systemContent = 'You are an AI assistant for OpenUtau Piano Roll, a music editing software. CRITICAL: You MUST ALWAYS choose exactly ONE tool for EVERY response.\n\nTool Selection Guide:\n\n**Use edit_word_in_verse for single verse word replacements:**\n- "change cosmos to universe in verse 1" → edit_word_in_verse(verse_number: 1, old_word: "cosmos", new_word: "universe")\n- "replace starlight with cosmos" → edit_word_in_verse(verse_number: 1, old_word: "starlight", new_word: "cosmos")\n\n**Use edit_word_in_multiple_verses for global word replacements:**\n- "change stas to rocks everywhere" → edit_word_in_multiple_verses(old_word: "stas", new_word: "rocks", scope: "everywhere")\n- "replace word X with Y in all verses" → edit_word_in_multiple_verses(old_word: "X", new_word: "Y", scope: "all_verses")\n\n**Use change_verse_lyrics for single verse theme changes:**\n- "make verse 1 about mars" → change_verse_lyrics(verse_number: 1, new_theme: "mars")\n- "change the first verse to winter theme" → change_verse_lyrics(verse_number: 1, new_theme: "winter")\n\n**Use change_multiple_verses for multi-verse theme changes (6 verses MAX per call):**\n- "change the first three verses to be about stars" → change_multiple_verses(start_verse: 1, end_verse: 3, new_theme: "stars")\n- "continue this theme into verses 2 and 3" → change_multiple_verses(start_verse: 2, end_verse: 3, new_theme: "[current theme]", progression_style: "continuous")\n- "make verses 1-4 about ocean with evolving story" → change_multiple_verses(start_verse: 1, end_verse: 4, new_theme: "ocean", progression_style: "evolving")\n\n**For WHOLE SONG or 7+ verse requests, use BATCHING:**\n- "make this song about X" → change_multiple_verses(start_verse: 1, end_verse: 6, new_theme: "X"), then respond_with_text with batch_operation metadata\n- "change entire song to Y theme" → change_multiple_verses(start_verse: 1, end_verse: 6, new_theme: "Y"), then respond_with_text with batch_operation metadata\n- "transform all verses to Z" → change_multiple_verses(start_verse: 1, end_verse: 6, new_theme: "Z"), then respond_with_text with batch_operation metadata\n\n**Use respond_with_text for non-lyrics conversations:**\n- "how does this work?" → respond_with_text(response: "explanation...")\n- "what can you do?" → respond_with_text(response: "I can help you...")\n- general questions → respond_with_text(response: "answer...")\n\n';
     
     console.log('Processing lyrics metadata for system message:', lyricsMetadata);
     
@@ -590,7 +775,7 @@ export async function POST(request: NextRequest) {
       lyricsMetadata.verses.forEach((verse: any) => {
         systemContent += `Verse ${verse.number}: "${verse.lyrics}"\n`;
       });
-      systemContent += '\nWhen users ask to change lyrics, IMMEDIATELY call change_verse_lyrics with the verse number, theme, and current lyrics. Do not provide text explanations - just use the tool.';
+      systemContent += '\nWhen users ask to change lyrics, IMMEDIATELY call the appropriate tool. Do not provide text explanations - just use the tool.\n\nCRITICAL BATCHING RULES:\n1. For requests affecting 7+ verses or "whole song/entire song/this song", MUST process in batches of 6 verses maximum\n2. FIRST: Call change_multiple_verses(start_verse: 1, end_verse: 6, new_theme: "theme")\n3. IMMEDIATELY AFTER: Call respond_with_text with this EXACT format:\n{"batch_operation": true, "completed_batch": 1, "next_batch": {"start": 7, "end": 12, "theme": "original theme"}, "total_verses": ' + lyricsMetadata.totalVerses + ', "original_request": "user\'s original request"}\n\nThis creates continue buttons for users instead of requiring manual typing. NEVER process more than 6 verses in one call.';
       console.log('Using real USTX lyrics in system message');
     } else {
       systemContent += 'No lyrics currently loaded. When users ask to change or add lyrics, IMMEDIATELY call change_verse_lyrics with verse number and theme. Never provide lyrics in text - only use the tool.';
@@ -763,7 +948,7 @@ export async function POST(request: NextRequest) {
         tools,
         tool_choice: "required",
         stream: true,
-        max_tokens: 4000,
+        max_tokens: 16000,
         temperature: 0.7
       }),
     });
@@ -1003,14 +1188,18 @@ export async function POST(request: NextRequest) {
                         try {
                           console.log('Multi-verse change tool call detected:', tc);
                           
-                          // Send tool execution status
-                          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ 
-                            tool_execution: {
-                              name: 'change_multiple_verses',
-                              status: 'executing',
-                              args: tc.function.arguments
-                            }
-                          })}\n\n`));
+                          // Send tool execution status (check if controller is still open)
+                          try {
+                            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ 
+                              tool_execution: {
+                                name: 'change_multiple_verses',
+                                status: 'executing',
+                                args: tc.function.arguments
+                              }
+                            })}\n\n`));
+                          } catch (controllerError) {
+                            console.log('Controller closed during status update, continuing silently');
+                          }
                           
                           const args = JSON.parse(tc.function.arguments);
                           console.log('Parsed multi-verse change args:', args);
@@ -1018,13 +1207,17 @@ export async function POST(request: NextRequest) {
                           const result = await executeChangeMultipleVerses(args, lyricsMetadata, messages);
                           console.log('Multi-verse change result:', result);
                           
-                          // Send tool execution result
-                          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ 
-                            tool_result: {
-                              name: 'change_multiple_verses',
-                              result: result
-                            }
-                          })}\n\n`));
+                          // Send tool execution result (check if controller is still open)
+                          try {
+                            controller.enqueue(encoder.encode(`data: ${JSON.stringify({ 
+                              tool_result: {
+                                name: 'change_multiple_verses',
+                                result: result
+                              }
+                            })}\n\n`));
+                          } catch (controllerError) {
+                            console.log('Controller closed during result update, operation completed successfully but frontend disconnected');
+                          }
                         } catch (toolError) {
                           console.error('Multi-verse change tool execution error:', toolError);
                           const errorMessage = toolError instanceof Error ? toolError.message : 'Unknown error';
@@ -1082,3 +1275,7 @@ export async function POST(request: NextRequest) {
     return new Response('Internal Server Error', { status: 500 });
   }
 }
+
+// Export runtime configuration for longer timeouts
+export const maxDuration = 300; // 5 minutes for long operations
+export const runtime = 'nodejs';

@@ -2,7 +2,8 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { USTXData, USTXNote, PhonemeTiming } from '@/types/openutau';
+import { USTXData, USTXNote, PhonemeTiming, DetailedPhonemeTiming } from '@/types/openutau';
+import { USTXLyricsManager } from '@/utils/ustxLyricsUtils';
 
 interface LyricsLine {
   notes: USTXNote[];
@@ -13,7 +14,7 @@ interface LyricsLine {
 
 interface LyricsDisplayProps {
   ustxData?: USTXData;
-  phonemeData?: PhonemeTiming[];
+  phonemeData?: DetailedPhonemeTiming[] | PhonemeTiming[];
   currentTime: number;
   isPlaying: boolean;
   playbackMode?: 'full' | 'segment';
@@ -44,60 +45,46 @@ const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
   const [editingValue, setEditingValue] = useState<string>('');
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Process USTX data into lyrics lines
+  // Process USTX data into lyrics lines using enhanced USTXLyricsManager
   useEffect(() => {
     if (!ustxData?.voice_parts) return;
 
-    const lines: LyricsLine[] = [];
-    let currentLine: USTXNote[] = [];
-    let lineStartTime = 0;
+    console.log('LYRICS DISPLAY: Processing with phoneme data:', !!phonemeData);
     
-    // Flatten all notes from all voice parts
+    // Use USTXLyricsManager for consistent phrase detection
+    const lyricsManager = new USTXLyricsManager(ustxData, phonemeData);
+    const verses = lyricsManager.detectVerses();
+    
+    console.log('LYRICS DISPLAY: Detected verses:', verses.length);
+    
+    // Flatten all notes from all voice parts, filtering like USTXLyricsManager
     const allNotes = ustxData.voice_parts.flatMap(part => 
       part.notes || []
-    ).sort((a, b) => a.position - b.position);
+    )
+    .filter(note => 
+      note.lyric && 
+      note.lyric.trim() !== '' && 
+      !note.lyric.startsWith('+')  // Exclude syllable extensions like DiffSinger
+    )
+    .sort((a, b) => a.position - b.position);
 
-    // Group notes into lines based on timing gaps or line breaks
-    for (let i = 0; i < allNotes.length; i++) {
-      const note = allNotes[i];
-      const nextNote = allNotes[i + 1];
+    // Convert verses to display lines using the actual detected note indices
+    const lines: LyricsLine[] = verses.map(verse => {
+      // Use the actual note indices from phrase detection
+      const verseNotes = allNotes.slice(verse.startNoteIndex, verse.endNoteIndex + 1);
       
-      if (currentLine.length === 0) {
-        lineStartTime = note.position;
-      }
+      console.log(`LYRICS DISPLAY: Creating line: "${verse.lyrics}" (notes ${verse.startNoteIndex}-${verse.endNoteIndex})`);
       
-      currentLine.push(note);
-      
-      // Check if we should start a new line
-      const shouldBreakLine = 
-        // No next note (end of song)
-        !nextNote ||
-        // Large gap between notes (more than 2 beats)
-        (nextNote.position - (note.position + note.duration)) > (ustxData.resolution * 2) ||
-        // Line break indicator in lyrics
-        note.lyric.includes('\n') ||
-        // Max notes per line
-        currentLine.length >= 20;
-      
-      if (shouldBreakLine) {
-        const lineEndTime = note.position + note.duration;
-        const lineText = currentLine.map(n => n.lyric).join(' ').replace(/\+/g, '').trim();
-        
-        if (lineText) {
-          lines.push({
-            notes: [...currentLine],
-            startTime: lineStartTime,
-            endTime: lineEndTime,
-            text: lineText
-          });
-        }
-        
-        currentLine = [];
-      }
-    }
+      return {
+        notes: verseNotes,
+        startTime: verseNotes[0]?.position || 0,
+        endTime: verseNotes[verseNotes.length - 1]?.position + verseNotes[verseNotes.length - 1]?.duration || 0,
+        text: verse.lyrics,
+      };
+    }).filter(line => line.text.trim().length > 0);
 
     setLyricsLines(lines);
-  }, [ustxData]);
+  }, [ustxData, phonemeData]);
 
   // Update highlighted note based on current playback time
   useEffect(() => {
@@ -321,7 +308,11 @@ const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
                         `}
                         title="Double-click to edit"
                       >
-                        {note.lyric === '+' ? '' : note.lyric}
+                        {note.lyric === '+' ? '' : (() => {
+                          // Check if this note has an SP phoneme override
+                          const hasSPOverride = note.phoneme_overrides?.some(override => override.phoneme === 'SP');
+                          return hasSPOverride ? 'SP' : note.lyric;
+                        })()}
                       </motion.span>
                     );
                   })}
