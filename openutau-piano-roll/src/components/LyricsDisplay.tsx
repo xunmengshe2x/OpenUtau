@@ -10,6 +10,8 @@ interface LyricsLine {
   startTime: number;
   endTime: number;
   text: string;
+  startNoteIndex?: number;
+  endNoteIndex?: number;
 }
 
 interface LyricsDisplayProps {
@@ -26,6 +28,7 @@ interface LyricsDisplayProps {
   onNoteClick?: (note: USTXNote) => void;
   onLyricEdit?: (noteIndex: number, newLyric: string) => void;
   onSegmentRender?: (startNoteIndex: number, endNoteIndex: number, lineIndex: number) => void;
+  cachedVerseDetection?: any[];
 }
 
 const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
@@ -37,7 +40,8 @@ const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
   currentSegmentInfo,
   onNoteClick,
   onLyricEdit,
-  onSegmentRender
+  onSegmentRender,
+  cachedVerseDetection
 }) => {
   const [lyricsLines, setLyricsLines] = useState<LyricsLine[]>([]);
   const [highlightedNoteIndex, setHighlightedNoteIndex] = useState<number>(-1);
@@ -45,46 +49,130 @@ const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
   const [editingValue, setEditingValue] = useState<string>('');
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Process USTX data into lyrics lines using enhanced USTXLyricsManager
+  // Process USTX data into lyrics lines using DiffSinger-style phoneme processing
   useEffect(() => {
     if (!ustxData?.voice_parts) return;
 
-    console.log('LYRICS DISPLAY: Processing with phoneme data:', !!phonemeData);
+    console.log('LYRICS DISPLAY: Processing with DiffSinger-style phoneme processing');
     
-    // Use USTXLyricsManager for consistent phrase detection
-    const lyricsManager = new USTXLyricsManager(ustxData, phonemeData);
-    const verses = lyricsManager.detectVerses();
-    
-    console.log('LYRICS DISPLAY: Detected verses:', verses.length);
-    
-    // Flatten all notes from all voice parts, filtering like USTXLyricsManager
-    const allNotes = ustxData.voice_parts.flatMap(part => 
-      part.notes || []
-    )
-    .filter(note => 
-      note.lyric && 
-      note.lyric.trim() !== '' && 
-      !note.lyric.startsWith('+')  // Exclude syllable extensions like DiffSinger
-    )
-    .sort((a, b) => a.position - b.position);
-
-    // Convert verses to display lines using the actual detected note indices
-    const lines: LyricsLine[] = verses.map(verse => {
-      // Use the actual note indices from phrase detection
-      const verseNotes = allNotes.slice(verse.startNoteIndex, verse.endNoteIndex + 1);
+    const updateVersesWithCurrentLyrics = async (cachedVerses: any[]) => {
+      console.log('LYRICS DISPLAY: Updating verses with current USTX lyrics');
       
-      console.log(`LYRICS DISPLAY: Creating line: "${verse.lyrics}" (notes ${verse.startNoteIndex}-${verse.endNoteIndex})`);
+      // Get current lyrical notes from USTX
+      const fullNotes = ustxData.voice_parts!.flatMap(part => 
+        part.notes || []
+      )
+      .filter(note => note.lyric && note.lyric.trim() !== '')
+      .sort((a, b) => a.position - b.position);
       
-      return {
-        notes: verseNotes,
-        startTime: verseNotes[0]?.position || 0,
-        endTime: verseNotes[verseNotes.length - 1]?.position + verseNotes[verseNotes.length - 1]?.duration || 0,
-        text: verse.lyrics,
-      };
-    }).filter(line => line.text.trim().length > 0);
+      const lyricalNotes = fullNotes.filter(note => !note.lyric.startsWith('+'));
+      
+      // Update each cached verse with current lyrics using the same boundaries
+      const updatedVerses = cachedVerses.map(verse => {
+        const verseNotes = lyricalNotes.slice(verse.startNoteIndex, verse.endNoteIndex + 1);
+        const currentLyrics = verseNotes.map(note => note.lyric).join(' ');
+        
+        console.log(`LYRICS DISPLAY: Verse ${verse.verseNumber} - cached: "${verse.lyrics}" → current: "${currentLyrics}"`);
+        
+        return {
+          ...verse,
+          lyrics: currentLyrics // Use current lyrics from USTX
+        };
+      });
+      
+      return updatedVerses;
+    };
 
-    setLyricsLines(lines);
-  }, [ustxData, phonemeData]);
+    const processVerses = async () => {
+      try {
+        // Use cached verse detection if available to prevent re-detection corruption
+        if (cachedVerseDetection && cachedVerseDetection.length > 0) {
+          console.log('LYRICS DISPLAY: Using cached verse detection (prevent re-detection corruption)');
+          console.log('LYRICS DISPLAY: Cached verses:', cachedVerseDetection.map(v => `${v.verseNumber}: "${v.lyrics}"`));
+          
+          // Use cached boundaries but extract current lyrics from USTX
+          const updatedVerses = await updateVersesWithCurrentLyrics(cachedVerseDetection);
+          processVersesToLines(updatedVerses);
+          return;
+        }
+        
+        // If no cached data, detect verses (but this should be rare in copilot mode)
+        console.log('LYRICS DISPLAY: No cached data available, detecting verses...');
+        const lyricsManager = new USTXLyricsManager(ustxData, phonemeData);
+        
+        // Try CLI-based phrase detection first (most accurate)
+        const verses = await lyricsManager.detectVersesWithCLI('fem_1_ln');
+        
+        console.log('LYRICS DISPLAY: CLI-based phrases detected:', verses.length);
+        console.log('LYRICS DISPLAY: Verses:', verses.map(v => `${v.verseNumber}: "${v.lyrics}"`));
+
+        // Process verses into display lines
+        processVersesToLines(verses);
+        
+      } catch (error) {
+        console.error('LYRICS DISPLAY: Error with CLI processing, falling back:', error);
+        
+        // Fallback to original method
+        const lyricsManager = new USTXLyricsManager(ustxData, phonemeData);
+        const verses = lyricsManager.detectVerses();
+        
+        console.log('LYRICS DISPLAY: Fallback verses detected:', verses.length);
+        processVersesToLines(verses);
+      }
+    };
+
+    const processVersesToLines = (verses: any[]) => {
+      // Get ALL notes (including + syllables) for render button indexing
+      const fullNotes = ustxData.voice_parts!.flatMap(part => 
+        part.notes || []
+      )
+      .filter(note => note.lyric && note.lyric.trim() !== '')
+      .sort((a, b) => a.position - b.position);
+
+      // Get lyrical notes only (excluding + syllables) for display - same as detectVersesWithCLI
+      const lyricalNotes = fullNotes.filter(note => !note.lyric.startsWith('+'));
+
+      // Convert verses to display lines using the actual detected note indices
+      const lines: LyricsLine[] = verses.map(verse => {
+        // verse.startNoteIndex and endNoteIndex are indices into lyricalNotes array
+        const verseNotes = lyricalNotes.slice(verse.startNoteIndex, verse.endNoteIndex + 1);
+        
+        // Convert lyrical note indices to full note indices for render button
+        const firstVerseNote = verseNotes[0];
+        const lastVerseNote = verseNotes[verseNotes.length - 1];
+        
+        let fullStartIndex = -1;
+        let fullEndIndex = -1;
+        
+        if (firstVerseNote && lastVerseNote) {
+          // Find these notes in the full notes array (including + syllables)
+          fullStartIndex = fullNotes.findIndex(note => 
+            note.position === firstVerseNote.position && note.lyric === firstVerseNote.lyric
+          );
+          fullEndIndex = fullNotes.findIndex(note => 
+            note.position === lastVerseNote.position && note.lyric === lastVerseNote.lyric
+          );
+        }
+        
+        console.log(`LYRICS DISPLAY: Creating line: "${verse.lyrics}"`);
+        console.log(`  → lyrical notes ${verse.startNoteIndex}-${verse.endNoteIndex}`);
+        console.log(`  → full notes ${fullStartIndex}-${fullEndIndex} (for render)`);
+        
+        return {
+          notes: verseNotes,
+          startTime: verseNotes[0]?.position || 0,
+          endTime: verseNotes[verseNotes.length - 1]?.position + verseNotes[verseNotes.length - 1]?.duration || 0,
+          text: verse.lyrics,
+          startNoteIndex: Math.max(0, fullStartIndex), // Use full note indices for render button
+          endNoteIndex: Math.max(0, fullEndIndex),
+        };
+      }).filter(line => line.text.trim().length > 0);
+
+      setLyricsLines(lines);
+    };
+
+    processVerses();
+  }, [ustxData, phonemeData, cachedVerseDetection]);
 
   // Update highlighted note based on current playback time
   useEffect(() => {
@@ -189,14 +277,13 @@ const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
     const line = lyricsLines[lineIndex];
     if (!line || !onSegmentRender) return;
 
-    const allNotes = ustxData?.voice_parts?.flatMap(part => part.notes || []) || [];
-    const startNoteIndex = allNotes.indexOf(line.notes[0]);
-    const endNoteIndex = allNotes.indexOf(line.notes[line.notes.length - 1]);
-
-    if (startNoteIndex !== -1 && endNoteIndex !== -1) {
-      onSegmentRender(startNoteIndex, endNoteIndex, lineIndex);
+    // Use the original startNoteIndex and endNoteIndex from CLI phrase detection
+    // These should be stored in the verse object when we created the line
+    if (line.startNoteIndex !== undefined && line.endNoteIndex !== undefined) {
+      onSegmentRender(line.startNoteIndex, line.endNoteIndex, lineIndex);
     }
   };
+
 
   if (!ustxData) {
     return (
@@ -261,14 +348,19 @@ const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
                 transition={{ delay: lineIndex * 0.1 }}
                 className="p-3 rounded-lg border border-gray-600 bg-gray-700 hover:bg-gray-650 transition-colors"
               >
-                <div className="flex flex-wrap gap-1 mb-2">
-                  {line.notes.map((note, noteIndex) => {
-                    const flatNoteIndex = ustxData.voice_parts
-                      .flatMap(part => part.notes || [])
-                      .indexOf(note);
-                    
-                    const isHighlighted = highlightedNoteIndex === flatNoteIndex;
-                    const isEditing = editingNoteIndex === flatNoteIndex;
+                {/* Full phrase text from CLI - prominently displayed */}
+                <div className="mb-3 p-3 bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg text-white font-semibold">
+                  {line.text}
+                </div>
+                
+                {/* Individual notes for editing - smaller and less prominent */}
+                <details className="mb-2">
+                  <summary className="text-xs text-gray-400 cursor-pointer hover:text-gray-300 mb-2">
+                    Individual words ({line.text.split(' ').filter(word => word.trim()).length}) - from CLI phrase
+                  </summary>
+                  <div className="flex flex-wrap gap-1">
+                    {line.text.split(' ').filter(word => word.trim()).map((word, wordIndex) => {
+                    const isEditing = false; // Disable editing for now since we're using CLI text
                     
                     if (isEditing) {
                       return (
@@ -289,41 +381,24 @@ const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
                     
                     return (
                       <motion.span
-                        key={noteIndex}
-                        data-note-index={flatNoteIndex}
-                        onClick={() => handleNoteClick(note)}
-                        onDoubleClick={() => handleNoteDoubleClick(note, flatNoteIndex)}
+                        key={`${lineIndex}-word-${wordIndex}`}
                         whileHover={{ scale: 1.05 }}
-                        whileTap={{ scale: 0.95 }}
-                        animate={isHighlighted ? { 
-                          scale: [1, 1.1, 1], 
-                          boxShadow: '0 0 20px rgba(168, 85, 247, 0.5)' 
-                        } : {}}
-                        className={`
-                          px-2 py-1 rounded cursor-pointer transition-all duration-200
-                          ${isHighlighted 
-                            ? 'bg-gradient-to-r from-purple-500 to-pink-500 text-white shadow-lg' 
-                            : 'bg-gray-600 hover:bg-gray-500 text-gray-100'
-                          }
-                        `}
-                        title="Double-click to edit"
+                        className="px-2 py-1 rounded text-xs bg-gray-600 text-gray-100 transition-all duration-200"
+                        title="Word from CLI phrase"
                       >
-                        {note.lyric === '+' ? '' : (() => {
-                          // Check if this note has an SP phoneme override
-                          const hasSPOverride = note.phoneme_overrides?.some(override => override.phoneme === 'SP');
-                          return hasSPOverride ? 'SP' : note.lyric;
-                        })()}
+                        {word}
                       </motion.span>
                     );
                   })}
-                </div>
+                  </div>
+                </details>
                 
                 {/* Line metadata */}
                 <div className="text-xs text-gray-400 flex justify-between items-center">
                   <div>
                     <span>Line {lineIndex + 1}</span>
                     <span className="mx-2">•</span>
-                    <span>{line.notes.length} notes</span>
+                    <span>{line.text.split(' ').filter(word => word.trim()).length} words</span>
                   </div>
                   <motion.button
                     whileHover={{ scale: 1.1 }}
@@ -383,6 +458,7 @@ const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
           </div>
         </div>
       </motion.div>
+
     </motion.div>
   );
 };

@@ -10,6 +10,15 @@ interface Message {
   isStreaming?: boolean;
   toolExecution?: any;
   toolResult?: any;
+  type?: string;
+  pitchControlData?: {
+    verse?: number;
+    originalMessage: string;
+  };
+  verseClarificationData?: {
+    availableVerses: Array<{ verseNumber: number; lyrics: string; noteCount: number }>;
+    originalMessage: string;
+  };
   batchOperation?: {
     completed_batch: number;
     next_batch: {
@@ -22,8 +31,9 @@ interface Message {
   };
 }
 
-export function useStreamingChat(ustxData?: USTXData, onUSTXUpdate?: (newData: USTXData) => void) {
+export function useStreamingChat(ustxData?: USTXData, onUSTXUpdate?: (newData: USTXData) => void, cachedVerseDetection?: any[]) {
   const [messages, setMessages] = useState<Message[]>([]);
+  // Note: Removed caching since tools handle their own data fetching
   const [isLoading, setIsLoading] = useState(false);
 
   const sendMessage = useCallback(async (content: string, model?: string) => {
@@ -51,16 +61,15 @@ export function useStreamingChat(ustxData?: USTXData, onUSTXUpdate?: (newData: U
       content: msg.content
     }));
 
-    // Create lyrics manager and extract metadata instead of sending full USTX
+    // Send USTX data directly to backend - let tools handle their own data fetching
     let lyricsMetadata = null;
     if (ustxData) {
-      try {
-        const lyricsManager = new USTXLyricsManager(ustxData);
-        lyricsMetadata = lyricsManager.getLyricsMetadata();
-      } catch (error) {
-        console.error('Error creating lyrics metadata:', error);
-        lyricsMetadata = { hasLyrics: false, totalVerses: 0, verses: [] };
-      }
+      // Just pass the USTX data - don't do expensive CLI calls here
+      lyricsMetadata = {
+        ustxData: ustxData,
+        hasLyrics: true, // Tools will determine this when needed
+        cachedVerseDetection: cachedVerseDetection || null // Pass cached data to prevent re-detection
+      };
     }
 
     console.log('Frontend sending:', { 
@@ -88,7 +97,10 @@ export function useStreamingChat(ustxData?: USTXData, onUSTXUpdate?: (newData: U
           message: content,
           messages: messageHistory,
           model,
-          lyricsMetadata,
+          lyricsMetadata: lyricsMetadata ? {
+            ...lyricsMetadata,
+            ustxData: ustxData  // Include original USTX data for pitch modifications
+          } : null,
         }),
         signal: controller.signal,
       });
@@ -126,6 +138,70 @@ export function useStreamingChat(ustxData?: USTXData, onUSTXUpdate?: (newData: U
 
             try {
               const parsed = JSON.parse(data);
+              
+              // Handle USTX updates from pitch modifications
+              if (parsed.type === 'ustx_update' && parsed.ustxData && onUSTXUpdate) {
+                console.log('Received USTX update from pitch modification:', {
+                  hasVoiceParts: !!parsed.ustxData.voice_parts,
+                  voicePartsCount: parsed.ustxData.voice_parts?.length,
+                  totalNotes: parsed.ustxData.voice_parts?.reduce((sum: number, part: any) => sum + (part.notes?.length || 0), 0)
+                });
+                onUSTXUpdate(parsed.ustxData);
+                continue;
+              }
+
+              // Handle verse clarification request
+              if (parsed.type === 'verse_clarification_request') {
+                console.log('Received verse clarification request:', parsed);
+                // The clarification message is already in the regular content flow
+                // We just need to store the metadata for potential future use
+                setMessages(prev => 
+                  prev.map(msg => 
+                    msg.id === assistantMessage.id 
+                      ? { 
+                          ...msg,
+                          type: 'verse_clarification_request',
+                          verseClarificationData: {
+                            availableVerses: parsed.availableVerses,
+                            originalMessage: parsed.originalMessage
+                          }
+                        }
+                      : msg
+                  )
+                );
+                continue;
+              }
+
+              // Handle pitch control panel (legacy)
+              if (parsed.type === 'pitch_control_panel') {
+                setMessages(prev => [
+                  ...prev,
+                  {
+                    id: Date.now().toString(),
+                    role: 'assistant',
+                    content: '🎛️ Pitch Controls',
+                    timestamp: new Date(),
+                    type: 'pitch_control_panel',
+                    pitchControlData: {
+                      verse: parsed.verse,
+                      originalMessage: parsed.message
+                    }
+                  }
+                ]);
+                continue;
+              }
+
+              // Handle message content from pitch modifications
+              if (parsed.type === 'message' && parsed.content) {
+                setMessages(prev => 
+                  prev.map(msg => 
+                    msg.id === assistantMessage.id 
+                      ? { ...msg, content: msg.content + parsed.content }
+                      : msg
+                  )
+                );
+                continue;
+              }
               
               if (parsed.content) {
                 setMessages(prev => 
@@ -196,13 +272,15 @@ export function useStreamingChat(ustxData?: USTXData, onUSTXUpdate?: (newData: U
                     });
                     
                     const lyricsManager = new USTXLyricsManager(ustxData);
-                    const updatedUSTX = lyricsManager.updateVerseLyrics(result.verse_number, result.new_lyrics);
+                    const updatedUSTX = await lyricsManager.updateVerseLyrics(result.verse_number, result.new_lyrics, 'fem_1_ln');
                     
                     console.log('USTX update completed, calling callback with updated data');
                     console.log('Updated USTX has voice parts:', !!updatedUSTX.voice_parts);
                     
                     onUSTXUpdate(updatedUSTX);
                     console.log('onUSTXUpdate callback called successfully');
+                    
+                    // USTX updated - no caching to clear
                   } catch (error) {
                     console.error('Error updating USTX locally:', error);
                     // Continue without crashing - show the result even if USTX update fails
@@ -230,11 +308,13 @@ export function useStreamingChat(ustxData?: USTXData, onUSTXUpdate?: (newData: U
                       const lyricsManager = new USTXLyricsManager(ustxData);
                       
                       // Use streaming update to update UI progressively
-                      const finalUSTX = lyricsManager.updateMultipleVersesStreaming(
+                      const finalUSTX = await lyricsManager.updateMultipleVersesStreaming(
                         verseUpdates,
                         (updatedUSTX, verseNumber, progress) => {
                           console.log(`Verse ${verseNumber} updated (${progress.current}/${progress.total}), calling callback`);
                           onUSTXUpdate(updatedUSTX);
+                          
+                          // USTX updated - no caching to clear
                         }
                       );
                       
@@ -335,7 +415,7 @@ export function useStreamingChat(ustxData?: USTXData, onUSTXUpdate?: (newData: U
     } finally {
       setIsLoading(false);
     }
-  }, [messages, ustxData, onUSTXUpdate]);
+  }, [messages, ustxData, onUSTXUpdate, cachedVerseDetection]);
 
   const clearMessages = useCallback(() => {
     setMessages([]);

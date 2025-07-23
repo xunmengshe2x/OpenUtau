@@ -30,6 +30,7 @@ export default function CopilotPage() {
     lineIndex: number;
   } | null>(null);
   const [qualityMode, setQualityMode] = useState<'preview' | 'standard' | 'high' | 'super'>('standard');
+  const [cachedVerseDetection, setCachedVerseDetection] = useState<any[] | null>(null);
   
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -39,12 +40,16 @@ export default function CopilotPage() {
     const loadInitialData = async () => {
       // Try to load from query params first
       const template = searchParams.get('template');
-      if (template === 'still_here') {
+      if (template === 'still_here' || template === 'still_here_original' || template === 'still_here_happy_verse1') {
         try {
-          const response = await fetch('/api/templates/still_here');
+          // Map old template name to new API
+          const apiTemplateName = template === 'still_here' ? 'still_here_original' : template;
+          
+          const response = await fetch(`/api/templates?name=${apiTemplateName}`);
           if (response.ok) {
-            const templateData = await response.json();
-            setUstxData(templateData);
+            const result = await response.json();
+            setUstxData(result.ustxData);
+            console.log(`📄 Loaded template from URL: ${result.template.displayName}`);
           }
         } catch (error) {
           console.error('Error loading template:', error);
@@ -72,6 +77,42 @@ export default function CopilotPage() {
       localStorage.setItem('copilot_ustx_data', JSON.stringify(ustxData));
     }
   }, [ustxData]);
+
+  // Detect verses once when USTX loads (cache the results to prevent re-detection)
+  useEffect(() => {
+    const detectAndCacheVerses = async () => {
+      if (!ustxData) {
+        setCachedVerseDetection(null);
+        return;
+      }
+
+      console.log('COPILOT: Detecting verses once for caching...');
+      try {
+        const { USTXLyricsManager } = await import('@/utils/ustxLyricsUtils');
+        const lyricsManager = new USTXLyricsManager(ustxData);
+        
+        let verses;
+        try {
+          verses = await lyricsManager.detectVersesWithCLI(singerId);
+          console.log('COPILOT: CLI detection successful, caching results');
+        } catch (error) {
+          console.log('COPILOT: CLI detection failed, using fallback');
+          verses = lyricsManager.detectVerses();
+        }
+        
+        setCachedVerseDetection(verses);
+        console.log('COPILOT: Cached verse detection:', verses.map(v => `${v.verseNumber}: "${v.lyrics}"`));
+      } catch (error) {
+        console.error('COPILOT: Error detecting verses:', error);
+        setCachedVerseDetection(null);
+      }
+    };
+
+    // Only detect verses when USTX structure changes, not on every lyrics update
+    if (ustxData && !cachedVerseDetection) {
+      detectAndCacheVerses();
+    }
+  }, [ustxData, singerId, cachedVerseDetection]);
 
   const handleMouseDown = (e: React.MouseEvent) => {
     setIsDragging(true);
@@ -105,6 +146,8 @@ export default function CopilotPage() {
 
   const handleUSTXUpdate = (newData: USTXData) => {
     setUstxData(newData);
+    // Keep cached verse detection to prevent re-detection corruption
+    // Only clear cache when completely new template/structure is loaded
     // Auto-render disabled for copilot mode - user can manually render if needed
     // autoRenderFullSong(newData);
   };
@@ -147,14 +190,20 @@ export default function CopilotPage() {
   };
 
   const handleTemplateSelect = async (templateName: string) => {
-    if (templateName === 'still_here') {
+    if (templateName === 'still_here_original' || templateName === 'still_here_happy_verse1' || templateName === 'still_here') {
       try {
-        const response = await fetch('/api/templates/still_here');
+        // Map old template name to new API
+        const apiTemplateName = templateName === 'still_here' ? 'still_here_original' : templateName;
+        
+        const response = await fetch(`/api/templates?name=${apiTemplateName}`);
         if (response.ok) {
-          const templateData = await response.json();
-          setUstxData(templateData);
+          const result = await response.json();
+          setUstxData(result.ustxData);
+          // Clear cached verse detection when loading new template (different song structure)
+          setCachedVerseDetection(null);
+          console.log(`📄 Loaded template: ${result.template.displayName} - ${result.template.description}`);
           // Auto-render disabled for copilot mode - user can manually render if needed
-          // autoRenderFullSong(templateData);
+          // autoRenderFullSong(result.ustxData);
         }
       } catch (error) {
         console.error('Error loading template:', error);
@@ -176,6 +225,8 @@ export default function CopilotPage() {
         const content = e.target?.result as string;
         const parsedData = yaml.load(content) as USTXData;
         setUstxData(parsedData);
+        // Clear cached verse detection when loading new file (different song structure)
+        setCachedVerseDetection(null);
         // Auto-render disabled for copilot mode - user can manually render if needed
         // autoRenderFullSong(parsedData);
       } catch (error) {
@@ -367,6 +418,7 @@ export default function CopilotPage() {
             ustxData={ustxData || undefined}
             onUSTXUpdate={handleUSTXUpdate}
             onTemplateSelect={handleTemplateSelect}
+            cachedVerseDetection={cachedVerseDetection || undefined}
           />
         </motion.div>
 
@@ -400,6 +452,7 @@ export default function CopilotPage() {
             onNoteClick={handleNoteSelect}
             onLyricEdit={handleLyricEdit}
             onSegmentRender={handleSegmentRender}
+            cachedVerseDetection={cachedVerseDetection || undefined}
           />
         </motion.div>
       </div>

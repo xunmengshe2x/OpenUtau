@@ -140,6 +140,12 @@ namespace OpenUtau.Core.DiffSinger {
                 JsonConvert.SerializeObject(ScriptArray, Formatting.Indented),
                 new UTF8Encoding(false));
         }
+
+        // Simple DS loading for direct rendering (no USTX reconstruction)
+        static public RawDiffSingerScript[] LoadScriptsForRendering(string filePath) {
+            var jsonContent = File.ReadAllText(filePath, new UTF8Encoding(false));
+            return JsonConvert.DeserializeObject<RawDiffSingerScript[]>(jsonContent) ?? new RawDiffSingerScript[0];
+        }
     }
     
     public class RawDiffSingerScript {
@@ -160,6 +166,20 @@ namespace OpenUtau.Core.DiffSinger {
         public string? gender = null;
         public string? velocity_timestep = null;
         public string? velocity = null;
+
+        // Parameterless constructor for JSON deserialization
+        public RawDiffSingerScript() {
+            text = "";
+            ph_seq = "";
+            ph_dur = "";
+            ph_num = "";
+            note_seq = "";
+            note_dur = "";
+            note_dur_seq = "";
+            note_slur = "";
+            is_slur_seq = "";
+            f0_timestep = "";
+        }
 
         public RawDiffSingerScript(DiffSingerScript script) {
             offset = script.offsetMs / 1000;

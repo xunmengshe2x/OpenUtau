@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
 import { USTXData } from '@/types/openutau';
 import { useStreamingChat } from '@/hooks/useStreamingChat';
+import VerseDisplay from './VerseDisplay';
 
 interface ChatMessage {
   id: string;
@@ -17,20 +18,24 @@ interface ChatInterfaceProps {
   ustxData?: USTXData;
   onUSTXUpdate?: (newData: USTXData) => void;
   onTemplateSelect?: (templateName: string) => void;
+  cachedVerseDetection?: any[];
 }
 
 const ChatInterface: React.FC<ChatInterfaceProps> = ({ 
   ustxData, 
   onUSTXUpdate, 
-  onTemplateSelect 
+  onTemplateSelect,
+  cachedVerseDetection
 }) => {
-  const { messages, sendMessage, clearMessages, isLoading, continueBatchOperation } = useStreamingChat(ustxData, onUSTXUpdate);
+  const { messages, sendMessage, clearMessages, isLoading, continueBatchOperation } = useStreamingChat(ustxData, onUSTXUpdate, cachedVerseDetection);
   const [inputValue, setInputValue] = useState('');
   const [selectedTemplate, setSelectedTemplate] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const templates = [
-    { id: 'still_here', name: 'Still Here', description: 'Emotional ballad template' },
+    { id: 'still_here_original', name: 'Still Here (Original)', description: 'Emotional ballad template - original melancholic version' },
+    { id: 'still_here_happy_verse1', name: 'Still Here (Happy Verse 1)', description: '🎵 Verse 1 made "way more happy" with raised pitch and lively vibrato' },
+    { id: 'still_here_2', name: 'Still Here 2 (SP Test)', description: '🔧 Version with SP phonemes added to "slipping" verse for testing' },
     { id: 'empty', name: 'Empty Project', description: 'Start from scratch' },
     { id: 'custom', name: 'Custom Upload', description: 'Upload your own USTX file' },
   ];
@@ -70,6 +75,35 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
       handleSendMessage();
     }
   };
+
+
+  // Parse verse results from message content to show VerseDisplay components
+  const parseVerseResults = (content: string) => {
+    const verseResults = [];
+    
+    // Look for success messages with verse information
+    const versePattern = /✅ \*\*Lyrics Updated Successfully!\*\*[\s\S]*?\*\*Verse (\d+)\*\* changed to theme: \*\*([^*]+)\*\*[\s\S]*?\*\*Original:\*\* ([^\n]+)[\s\S]*?\*\*New:\*\* ([^\n]+)[\s\S]*?\*Syllables preserved: ([✓✗])\*/g;
+    
+    let match;
+    while ((match = versePattern.exec(content)) !== null) {
+      verseResults.push({
+        verseNumber: parseInt(match[1]),
+        theme: match[2],
+        originalLyrics: match[3],
+        newLyrics: match[4],
+        syllablesPreserved: match[5] === '✓'
+      });
+    }
+    
+    return verseResults;
+  };
+
+  // Remove verse result sections from content so they don't display twice
+  const removeVerseResults = (content: string) => {
+    const versePattern = /✅ \*\*Lyrics Updated Successfully!\*\*[\s\S]*?\*Syllables preserved: [✓✗]\*/g;
+    return content.replace(versePattern, '').trim();
+  };
+
 
   return (
     <div className="flex flex-col h-full bg-gray-800">
@@ -116,18 +150,18 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
             <motion.button
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.95 }}
-              onClick={() => setInputValue('Increase the pitch of the chorus')}
+              onClick={() => setInputValue('Change verse 1 lyrics to be more happy and uplifting')}
               className="px-3 py-1 bg-green-600 text-green-100 rounded-full text-xs hover:bg-green-500 transition-colors"
             >
-              Adjust pitch
+              Happy lyrics
             </motion.button>
             <motion.button
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.95 }}
-              onClick={() => setInputValue('Add more vibrato to the ending')}
+              onClick={() => setInputValue('Make the ending lyrics more expressive and emotional')}
               className="px-3 py-1 bg-purple-600 text-purple-100 rounded-full text-xs hover:bg-purple-500 transition-colors"
             >
-              Add vibrato
+              Expressive ending
             </motion.button>
           </div>
           
@@ -148,6 +182,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
           )}
         </div>
       </motion.div>
+
 
       {/* Chat Messages */}
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
@@ -188,44 +223,73 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
                 >
                   {message.role === 'assistant' ? (
                     <div className="space-y-3">
-                      {/* Response Section */}
-                      <div className="prose prose-lg prose-invert max-w-none">
-                        <ReactMarkdown 
-                          components={{
-                            p: ({ children }) => <p className="mb-4 text-gray-100 leading-relaxed">{children}</p>,
-                            h1: ({ children }) => <h1 className="text-2xl font-bold mb-4 text-white">{children}</h1>,
-                            h2: ({ children }) => <h2 className="text-xl font-semibold mb-3 text-white">{children}</h2>,
-                            h3: ({ children }) => <h3 className="text-lg font-medium mb-2 text-white">{children}</h3>,
-                            ul: ({ children }) => <ul className="list-disc ml-6 mb-4 space-y-1">{children}</ul>,
-                            ol: ({ children }) => <ol className="list-decimal ml-6 mb-4 space-y-1">{children}</ol>,
-                            li: ({ children }) => <li className="text-gray-200">{children}</li>,
-                            code: ({ children, className }) => 
-                              className ? (
-                                <pre className="bg-gray-900 border border-gray-600 rounded-lg p-4 my-4 overflow-x-auto">
-                                  <code className="text-sm text-cyan-300">{children}</code>
-                                </pre>
-                              ) : (
-                                <code className="bg-gray-700 px-2 py-1 rounded text-cyan-300 text-sm">{children}</code>
-                              ),
-                            blockquote: ({ children }) => (
-                              <blockquote className="border-l-4 border-blue-500 pl-4 my-4 italic text-gray-300">
-                                {children}
-                              </blockquote>
-                            ),
-                            strong: ({ children }) => <strong className="font-semibold text-white">{children}</strong>,
-                            em: ({ children }) => <em className="italic text-gray-200">{children}</em>,
-                          }}
-                        >
-                          {message.content}
-                        </ReactMarkdown>
-                        {message.isStreaming && (
-                          <motion.span
-                            animate={{ opacity: [1, 0.3] }}
-                            transition={{ duration: 1.2, repeat: Infinity }}
-                            className="inline-block w-3 h-5 bg-gradient-to-t from-cyan-400 to-blue-400 ml-2 rounded-sm"
-                          />
-                        )}
-                      </div>
+                      {/* Regular Message Content */}
+                      {(
+                        <>
+                          {/* Verse Results */}
+                          {(() => {
+                            const verseResults = parseVerseResults(message.content);
+                            const filteredContent = removeVerseResults(message.content);
+                            
+                            return (
+                              <>
+                                {verseResults.map((verse, index) => (
+                                  <VerseDisplay
+                                    key={`verse-${verse.verseNumber}-${index}`}
+                                    verseNumber={verse.verseNumber}
+                                    theme={verse.theme}
+                                    originalLyrics={verse.originalLyrics}
+                                    newLyrics={verse.newLyrics}
+                                    syllablesPreserved={verse.syllablesPreserved}
+                                  />
+                                ))}
+                                
+                                {/* Response Section */}
+                                {filteredContent && (
+                                  <div className="prose prose-lg prose-invert max-w-none">
+                                    <ReactMarkdown 
+                                      components={{
+                                        p: ({ children }) => <p className="mb-4 text-gray-100 leading-relaxed">{children}</p>,
+                                        h1: ({ children }) => <h1 className="text-2xl font-bold mb-4 text-white">{children}</h1>,
+                                        h2: ({ children }) => <h2 className="text-xl font-semibold mb-3 text-white">{children}</h2>,
+                                        h3: ({ children }) => <h3 className="text-lg font-medium mb-2 text-white">{children}</h3>,
+                                        ul: ({ children }) => <ul className="list-disc ml-6 mb-4 space-y-1">{children}</ul>,
+                                        ol: ({ children }) => <ol className="list-decimal ml-6 mb-4 space-y-1">{children}</ol>,
+                                        li: ({ children }) => <li className="text-gray-200">{children}</li>,
+                                        code: ({ children, className }) => 
+                                          className ? (
+                                            <pre className="bg-gray-900 border border-gray-600 rounded-lg p-4 my-4 overflow-x-auto">
+                                              <code className="text-sm text-cyan-300">{children}</code>
+                                            </pre>
+                                          ) : (
+                                            <code className="bg-gray-700 px-2 py-1 rounded text-cyan-300 text-sm">{children}</code>
+                                          ),
+                                        blockquote: ({ children }) => (
+                                          <blockquote className="border-l-4 border-blue-500 pl-4 my-4 italic text-gray-300">
+                                            {children}
+                                          </blockquote>
+                                        ),
+                                        strong: ({ children }) => <strong className="font-semibold text-white">{children}</strong>,
+                                        em: ({ children }) => <em className="italic text-gray-200">{children}</em>,
+                                      }}
+                                    >
+                                      {filteredContent}
+                                    </ReactMarkdown>
+                                  </div>
+                                )}
+                              </>
+                            );
+                          })()}
+                          
+                          {message.isStreaming && (
+                            <motion.span
+                              animate={{ opacity: [1, 0.3] }}
+                              transition={{ duration: 1.2, repeat: Infinity }}
+                              className="inline-block w-3 h-5 bg-gradient-to-t from-cyan-400 to-blue-400 ml-2 rounded-sm"
+                            />
+                          )}
+                        </>
+                      )}
                       
                       {/* Batch Operation Continue Buttons */}
                       {message.batchOperation && !message.isStreaming && (
@@ -379,6 +443,7 @@ const ChatInterface: React.FC<ChatInterfaceProps> = ({
           </motion.button>
         </div>
       </motion.div>
+
     </div>
   );
 };

@@ -17,6 +17,8 @@ using System.Diagnostics;
 using OpenUtau.Core.Render;
 using OpenUtau.Core.SignalChain;
 using NAudio.Wave;
+using OpenUtau.Core.DiffSinger;
+using Newtonsoft.Json;
 
 namespace OpenUtau.Cli {
     class PhonemeTiming {
@@ -24,6 +26,9 @@ namespace OpenUtau.Cli {
         public int NoteIndex { get; set; }
     public string Phoneme { get; set; } = string.Empty;
         public double TimeMs { get; set; }
+        public int Position { get; set; }
+        public int Duration { get; set; }
+        public int End { get; set; }
     }
 
     class Program {
@@ -55,15 +60,29 @@ namespace OpenUtau.Cli {
                     "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> <output.wav>\n" +
                     "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> [output.json] [output.wav] --reset-timings\n" +
                     "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> [output.json] [output.wav] --reset-timings --preserve-silence-timing\n" +
-                    "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> [output.json] [output.wav] --phoneme-override lyric:phoneme_index:old_phoneme:new_phoneme");
+                    "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> [output.json] [output.wav] --phoneme-override lyric:phoneme_index:old_phoneme:new_phoneme\n" +
+                    "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> <output.ds> --diffsinger [--no-pitch]\n" +
+                    "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> <phrases.json> --phrases-only\n" +
+                    "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> [output.json] [output.wav] --render-phrases 1,2,5\n" +
+                    "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> [output.json] [output.wav] --render-phrases 2 --trim-leading-silence");
                 return 1;
             }
-            var ustxPath = args[0];
+            var inputPath = args[0]; // Can be USTX or DS file
             var singerId = args[1];
             string outputPath = null;
             string outputWav = null;
+            string outputDs = null;
             bool resetTimings = false;
             bool preserveSilenceTiming = false;
+            bool diffsingerMode = false;
+            bool exportPitch = true;
+            bool phrasesOnly = false;
+            bool trimLeadingSilence = false;
+            var renderPhraseIndices = new List<int>();
+            
+            // Detect input file type
+            var inputExtension = Path.GetExtension(inputPath).ToLowerInvariant();
+            bool isUstxInput = inputExtension == ".ustx";
             var phonemeOverrides = new List<(string lyric, int phonemeIndex, string oldPhoneme, string newPhoneme)>();
             
             // Parse remaining arguments
@@ -73,6 +92,30 @@ namespace OpenUtau.Cli {
                     resetTimings = true;
                 } else if (arg.Equals("--preserve-silence-timing", StringComparison.OrdinalIgnoreCase)) {
                     preserveSilenceTiming = true;
+                } else if (arg.Equals("--diffsinger", StringComparison.OrdinalIgnoreCase)) {
+                    diffsingerMode = true;
+                } else if (arg.Equals("--no-pitch", StringComparison.OrdinalIgnoreCase)) {
+                    exportPitch = false;
+                } else if (arg.Equals("--phrases-only", StringComparison.OrdinalIgnoreCase)) {
+                    phrasesOnly = true;
+                } else if (arg.Equals("--trim-leading-silence", StringComparison.OrdinalIgnoreCase)) {
+                    trimLeadingSilence = true;
+                } else if (arg.StartsWith("--render-phrases", StringComparison.OrdinalIgnoreCase)) {
+                    if (i + 1 < args.Length) {
+                        var phrasesSpec = args[i + 1];
+                        var parts = phrasesSpec.Split(',');
+                        foreach (var part in parts) {
+                            if (int.TryParse(part.Trim(), out int phraseNum)) {
+                                renderPhraseIndices.Add(phraseNum - 1); // Convert to 0-based index
+                                Console.Error.WriteLine($"[DEBUG] Will render phrase {phraseNum} (index {phraseNum - 1})");
+                            } else {
+                                Console.Error.WriteLine($"[WARNING] Invalid phrase number in render-phrases: {part}");
+                            }
+                        }
+                        i++; // Skip the next argument as it's the phrase specification
+                    } else {
+                        Console.Error.WriteLine("[WARNING] --render-phrases requires a specification argument");
+                    }
                 } else if (arg.StartsWith("--phoneme-override", StringComparison.OrdinalIgnoreCase)) {
                     if (i + 1 < args.Length) {
                         var overrideSpec = args[i + 1];
@@ -96,23 +139,31 @@ namespace OpenUtau.Cli {
                     }
                 } else if (Path.GetExtension(arg).Equals(".wav", StringComparison.OrdinalIgnoreCase)) {
                     outputWav = arg;
+                } else if (Path.GetExtension(arg).Equals(".ds", StringComparison.OrdinalIgnoreCase)) {
+                    outputDs = arg;
+                    diffsingerMode = true; // Auto-enable DiffSinger mode for .ds files
                 } else if (outputPath == null) {
                     outputPath = arg;
                 }
             }
             Console.Error.WriteLine($"[DEBUG] outputWav parameter = '{outputWav}'");
+            Console.Error.WriteLine($"[DEBUG] outputDs parameter = '{outputDs}'");
+            Console.Error.WriteLine($"[DEBUG] diffsingerMode = {diffsingerMode}");
+            Console.Error.WriteLine($"[DEBUG] exportPitch = {exportPitch}");
             Console.Error.WriteLine($"[DEBUG] resetTimings = {resetTimings}");
             Console.Error.WriteLine($"[DEBUG] preserveSilenceTiming = {preserveSilenceTiming}");
-            if (!File.Exists(ustxPath)) {
-                Console.Error.WriteLine($"Error: USTX file not found: {ustxPath}");
+            Console.Error.WriteLine($"[DEBUG] Input file type: {(isUstxInput ? "USTX" : "Unknown")}");
+            
+            if (!File.Exists(inputPath)) {
+                Console.Error.WriteLine($"Error: Input file not found: {inputPath}");
                 return 1;
             }
             // Support non-UTF8 encodings
             Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
 
-            // If a local singer folder (matching the singer ID) resides alongside the USTX, use it directly
-            var ustxDir = Path.GetDirectoryName(Path.GetFullPath(ustxPath));
-            var localSingerPath = Path.Combine(ustxDir ?? string.Empty, singerId);
+            // If a local singer folder (matching the singer ID) resides alongside the input file, use it directly
+            var inputDir = Path.GetDirectoryName(Path.GetFullPath(inputPath));
+            var localSingerPath = Path.Combine(inputDir ?? string.Empty, singerId);
             if (Directory.Exists(localSingerPath)) {
                 Preferences.Default.AdditionalSingerPath = localSingerPath;
                 Preferences.Default.InstallToAdditionalSingersPath = true;
@@ -126,16 +177,17 @@ namespace OpenUtau.Cli {
             DocManager.Inst.SearchAllLegacyPlugins();
             DocManager.Inst.Initialize(Thread.CurrentThread, TaskScheduler.Current);
 
-            UProject project;
+            UProject project = null;
+            
             try {
-                project = Ustx.Load(ustxPath);
+                project = Ustx.Load(inputPath);
             } catch (Exception e) {
                 Console.Error.WriteLine($"Error: failed to load project: {e.Message}");
                 return 1;
             }
 
-            // Reset phoneme timings if requested
-            if (resetTimings) {
+            // Reset phoneme timings if requested (only for USTX mode)
+            if (resetTimings && project != null) {
                 Console.Error.WriteLine("[DEBUG] Resetting phoneme timings and aliases for all notes");
                 int timingResetCount = 0;
                 int aliasResetCount = 0;
@@ -189,9 +241,9 @@ namespace OpenUtau.Cli {
             }
 
             var singer = SingerManager.Inst.GetSinger(singerId);
-            // fallback: if not found among installed singers, try loading a voicebank folder next to the USTX
+            // fallback: if not found among installed singers, try loading a voicebank folder next to the input file
             if (singer == null) {
-                var voicebankDir = Path.Combine(ustxDir ?? string.Empty, singerId);
+                var voicebankDir = Path.Combine(inputDir ?? string.Empty, singerId);
                 if (Directory.Exists(voicebankDir)) {
                     var loader = new VoicebankLoader(voicebankDir);
                     var banks = loader.SearchAll().ToList();
@@ -205,6 +257,7 @@ namespace OpenUtau.Cli {
                 return 1;
             }
             Console.Error.WriteLine($"[DEBUG] Singer loaded: Id='{singer.Id}', Name='{singer.Name}', Type='{singer.SingerType}', DefaultPhonemizer='{singer.DefaultPhonemizer}', Location='{singer.Location}'");
+
 
             var timeAxis = project.timeAxis;
             var results = new List<PhonemeTiming>();
@@ -348,11 +401,33 @@ namespace OpenUtau.Cli {
                         var ms = timeAxis.TickPosToMsPos(ph.position);
                         // DEBUG: phoneme timing for output
                         Console.Error.WriteLine($"[DEBUG] Group {gi}, phoneme #{pi}: '{ph.phoneme}' at tick {ph.position} (~{ms} ms)");
+                        // Calculate duration from next phoneme position or note end
+                        int duration = 0;
+                        int end = ph.position;
+                        if (pi + 1 < phonemeResults[gi].Length) {
+                            // Use next phoneme position as end
+                            end = phonemeResults[gi][pi + 1].position;
+                            duration = end - ph.position;
+                        } else if (gi + 1 < groups.Count && phonemeResults.Count > gi + 1) {
+                            // Use first phoneme of next group as end
+                            if (phonemeResults[gi + 1].Length > 0) {
+                                end = phonemeResults[gi + 1][0].position;
+                                duration = end - ph.position;
+                            }
+                        } else {
+                            // Last phoneme, estimate duration
+                            duration = 240; // Default duration in ticks
+                            end = ph.position + duration;
+                        }
+
                         results.Add(new PhonemeTiming {
                             PartName = part.DisplayName,
                             NoteIndex = noteIndexCounter,
                             Phoneme = ph.phoneme,
                             TimeMs = ms,
+                            Position = ph.position,
+                            Duration = duration,
+                            End = end,
                         });
                     }
                     noteIndexCounter++;
@@ -436,13 +511,45 @@ namespace OpenUtau.Cli {
                 Console.Error.WriteLine($"[DEBUG] Phoneme validation completed for part '{part.DisplayName}'");
             }
 
-            // Output JSON
-            var options = new JsonSerializerOptions { WriteIndented = true };
-            var output = JsonSerializer.Serialize(results, options);
-            if (!string.IsNullOrEmpty(outputPath)) {
-                File.WriteAllText(outputPath, output);
-            } else {
-                Console.WriteLine(output);
+            // Handle DiffSinger export
+            if (diffsingerMode && !string.IsNullOrEmpty(outputDs)) {
+                Console.Error.WriteLine("[DEBUG] Generating DiffSinger script export");
+                try {
+                    foreach (var part in project.parts.OfType<UVoicePart>()) {
+                        Console.Error.WriteLine($"[DEBUG] Exporting DiffSinger script for part '{part.DisplayName}'");
+                        Console.Error.WriteLine($"[DEBUG] Part has {part.notes.Count} notes, {part.phonemes.Count} phonemes");
+                        Console.Error.WriteLine($"[DEBUG] Project has timeAxis: {project.timeAxis != null}");
+                        Console.Error.WriteLine($"[DEBUG] Track singer: {project.tracks[part.trackNo].Singer?.Name ?? "null"}");
+                        
+                        // Generate render phrases if not already done
+                        if (part.renderPhrases == null || part.renderPhrases.Count == 0) {
+                            Console.Error.WriteLine("[DEBUG] Generating render phrases for DiffSinger export");
+                            var track = project.tracks[part.trackNo];
+                            track.RendererSettings.Validate(track);
+                            part.renderPhrases = RenderPhrase.FromPart(project, track, part).ToList();
+                            Console.Error.WriteLine($"[DEBUG] Generated {part.renderPhrases.Count} render phrases");
+                        }
+                        
+                        DiffSingerScript.SavePart(project, part, outputDs, false, exportPitch);
+                        Console.Error.WriteLine($"[DEBUG] DiffSinger script saved to {outputDs}");
+                        break; // Only export first voice part for now
+                    }
+                } catch (Exception e) {
+                    Console.Error.WriteLine($"Error: DiffSinger export failed: {e.Message}");
+                    Console.Error.WriteLine($"Stack trace: {e.StackTrace}");
+                    return 1;
+                }
+            }
+
+            // Output JSON (only if not DiffSinger mode or if outputPath is explicitly specified)
+            if (!diffsingerMode || !string.IsNullOrEmpty(outputPath)) {
+                var options = new JsonSerializerOptions { WriteIndented = true };
+                var output = System.Text.Json.JsonSerializer.Serialize(results, options);
+                if (!string.IsNullOrEmpty(outputPath)) {
+                    File.WriteAllText(outputPath, output);
+                } else if (!diffsingerMode) {
+                    Console.WriteLine(output);
+                }
             }
             Console.Error.WriteLine($"[DEBUG] Skipping audio render block? outputWav.IsNullOrEmpty={string.IsNullOrEmpty(outputWav)}");
             if (!string.IsNullOrEmpty(outputWav)) {
@@ -470,12 +577,64 @@ namespace OpenUtau.Cli {
                 var allPhrases = project.parts.OfType<UVoicePart>()
                     .SelectMany(vp => vp.renderPhrases.Select(rp => (vp.trackNo, rp)))
                     .ToList();
-                Console.Error.WriteLine($"[DEBUG] Starting audio rendering of {allPhrases.Count} phrase(s)...");
+                Console.Error.WriteLine($"[DEBUG] Generated {allPhrases.Count} phrase(s) for processing...");
+
+                // If --phrases-only flag is set, export phrases and exit
+                if (phrasesOnly) {
+                    Console.Error.WriteLine($"[DEBUG] Phrases-only mode: exporting {allPhrases.Count} phrases to JSON");
+                    
+                    var phrasesData = new {
+                        totalPhrases = allPhrases.Count,
+                        phrases = allPhrases.Select((phraseInfo, index) => new {
+                            phraseNumber = index + 1,
+                            trackNo = phraseInfo.trackNo,
+                            startTimeMs = phraseInfo.rp.positionMs,
+                            endTimeMs = phraseInfo.rp.positionMs + phraseInfo.rp.durationMs,
+                            durationMs = phraseInfo.rp.durationMs,
+                            phonemes = phraseInfo.rp.phones.Select(phone => new {
+                                phoneme = phone.phoneme,
+                                positionMs = phone.positionMs,
+                                durationMs = phone.durationMs
+                            }).ToList(),
+                            lyrics = string.Join(" ", phraseInfo.rp.notes
+                                .Select(n => n.lyric)
+                                .Where(l => !string.IsNullOrEmpty(l) && !l.StartsWith("+")))
+                        }).ToList()
+                    };
+                    
+                    // Write phrases to output file
+                    var phrasesJson = System.Text.Json.JsonSerializer.Serialize(phrasesData, new JsonSerializerOptions { 
+                        WriteIndented = true 
+                    });
+                    
+                    if (!string.IsNullOrEmpty(outputPath)) {
+                        File.WriteAllText(outputPath, phrasesJson, Encoding.UTF8);
+                        Console.Error.WriteLine($"[DEBUG] Phrases exported to: {outputPath}");
+                    } else {
+                        Console.WriteLine(phrasesJson);
+                    }
+                    
+                    Console.Error.WriteLine($"[DEBUG] Phrases-only export completed successfully");
+                    return 0;
+                }
+
+                // Determine which phrases to render
+                var phrasesToRender = renderPhraseIndices.Count > 0 
+                    ? renderPhraseIndices.Where(i => i >= 0 && i < allPhrases.Count).ToList()
+                    : Enumerable.Range(0, allPhrases.Count).ToList();
+                
+                Console.Error.WriteLine($"[DEBUG] Starting audio rendering of {phrasesToRender.Count} phrase(s) out of {allPhrases.Count} total...");
+                if (renderPhraseIndices.Count > 0) {
+                    Console.Error.WriteLine($"[DEBUG] Rendering specific phrases: {string.Join(", ", phrasesToRender.Select(i => i + 1))}");
+                }
+                
                 var renderer = Renderers.CreateRenderer(Renderers.GetDefaultRenderer(singer.SingerType));
                 var samples = new List<float>();
                 double lastPhraseEndMs = 0;
+                double firstPhraseStartMs = -1; // Track first phrase timing for trimming
                 
-                for (int i = 0; i < allPhrases.Count; i++) {
+                for (int idx = 0; idx < phrasesToRender.Count; idx++) {
+                    int i = phrasesToRender[idx];
                     var (trackNo, phrase) = allPhrases[i];
                     Console.Error.WriteLine($"[DEBUG] Rendering phrase {i + 1}/{allPhrases.Count} (track {trackNo})...");
                     
@@ -489,8 +648,19 @@ namespace OpenUtau.Cli {
                         var silenceLayout = renderer.Layout(phrase);
                         double silencePhraseStartMs = silenceLayout.positionMs - silenceLayout.leadingMs;
                         
-                        // Insert silence gap if there's a gap between phrases
-                        if (i > 0 && silencePhraseStartMs > lastPhraseEndMs) {
+                        // Track first phrase start time for trimming
+                        if (firstPhraseStartMs == -1) {
+                            firstPhraseStartMs = silencePhraseStartMs;
+                        }
+                        
+                        // Skip silence phrase if trimming and this is first phrase
+                        if (idx == 0 && trimLeadingSilence) {
+                            Console.Error.WriteLine($"[DEBUG]   Skipping leading silence phrase when trimming");
+                            continue;
+                        }
+                        
+                        // Insert silence gap if there's a gap between phrases (unless this is first phrase in render list)
+                        if (idx > 0 && silencePhraseStartMs > lastPhraseEndMs) {
                             double gapMs = silencePhraseStartMs - lastPhraseEndMs;
                             int gapSamples = (int)(gapMs * 44100 / 1000);
                             Console.Error.WriteLine($"[DEBUG]   Gap → inserting {gapMs:F2}ms ({gapSamples} samples) of silence");
@@ -514,12 +684,21 @@ namespace OpenUtau.Cli {
                     // Calculate phrase start time (accounting for leading silence)
                     double phraseStartMs = layout.positionMs - layout.leadingMs;
                     
-                    // Insert silence gap if there's a gap between phrases
-                    if (i > 0 && phraseStartMs > lastPhraseEndMs) {
+                    // Track first phrase start time for trimming
+                    if (firstPhraseStartMs == -1) {
+                        firstPhraseStartMs = phraseStartMs;
+                    }
+                    
+                    // Insert silence gap if there's a gap between phrases (unless trimming and this is first phrase in render list)
+                    if (idx > 0 && phraseStartMs > lastPhraseEndMs) {
                         double gapMs = phraseStartMs - lastPhraseEndMs;
                         int gapSamples = (int)(gapMs * 44100 / 1000);
                         Console.Error.WriteLine($"[DEBUG]   Gap → inserting {gapMs:F2}ms ({gapSamples} samples) of silence");
                         samples.AddRange(new float[gapSamples]);
+                    } else if (idx == 0 && trimLeadingSilence) {
+                        // Skip initial silence for first phrase when trimming
+                        Console.Error.WriteLine($"[DEBUG]   Trimming {phraseStartMs:F2}ms of leading silence (phrase {i + 1})");
+                        lastPhraseEndMs = 0; // Reset timeline to start immediately
                     }
                     
                     var cancellationTokenSource = new CancellationTokenSource();
@@ -589,5 +768,6 @@ namespace OpenUtau.Cli {
             }
             return 0;
         }
+
     }
 }

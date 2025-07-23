@@ -314,6 +314,13 @@ async function executeChangeMultipleVerses(args: {
   
   console.log('Executing multi-verse change:', { start_verse, end_verse, new_theme, progression_style });
   
+  console.log('[DEBUG] lyricsMetadata structure:', {
+    hasVerses: !!lyricsMetadata?.verses,
+    versesLength: lyricsMetadata?.verses?.length,
+    versesKeys: lyricsMetadata?.verses?.[0] ? Object.keys(lyricsMetadata.verses[0]) : 'no verses',
+    firstFewVerses: lyricsMetadata?.verses?.slice(0, 3)
+  });
+  
   if (!lyricsMetadata?.verses) {
     return {
       success: false,
@@ -325,15 +332,17 @@ async function executeChangeMultipleVerses(args: {
   }
   
   const results: any[] = [];
-  const apiKey = process.env.OPENROUTER_API_KEY || "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";
+  const apiKey = process.env.OPENROUTER_API_KEY || "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";
   
   // Process each verse in the range
   for (let verseNum = start_verse; verseNum <= end_verse; verseNum++) {
+    console.log(`[DEBUG] Looking for verse ${verseNum} in verses:`, lyricsMetadata.verses.map(v => ({ number: v.number, lyrics: v.lyrics?.slice(0, 50) + '...' })));
     const verse = lyricsMetadata.verses.find((v: any) => v.number === verseNum);
     if (!verse) {
-      console.log(`Verse ${verseNum} not found, skipping`);
+      console.log(`[ERROR] Verse ${verseNum} not found in verses array! Available verses:`, lyricsMetadata.verses.map(v => v.number));
       continue;
     }
+    console.log(`[DEBUG] Found verse ${verseNum}:`, { number: verse.number, lyrics: verse.lyrics });
     
     // Adjust theme based on progression style
     let verseTheme = new_theme;
@@ -345,20 +354,32 @@ async function executeChangeMultipleVerses(args: {
       verseTheme = `${new_theme} (continuing from previous verse)`;
     }
     
-    const result = await executeChangeLyrics({
-      verse_number: verseNum,
-      new_theme: verseTheme,
-      current_lyrics: verse.lyrics
-    }, lyricsMetadata, chatHistory);
-    
-    if (result.success) {
-      results.push(result);
+    try {
+      console.log(`[DEBUG] Processing verse ${verseNum} with theme: ${verseTheme}`);
+      const result = await executeChangeLyrics({
+        verse_number: verseNum,
+        new_theme: verseTheme,
+        current_lyrics: verse.lyrics
+      }, lyricsMetadata, chatHistory);
+      
+      console.log(`[DEBUG] Verse ${verseNum} result:`, result);
+      if (result.success) {
+        results.push(result);
+        console.log(`[DEBUG] Added verse ${verseNum} to results, total: ${results.length}`);
+      } else {
+        console.log(`[DEBUG] Verse ${verseNum} failed:`, result);
+      }
+    } catch (error) {
+      console.error(`[ERROR] Failed to process verse ${verseNum}:`, error);
     }
   }
   
   // Check if this is part of a larger operation that needs batching
   const totalVerses = lyricsMetadata.totalVerses || lyricsMetadata.verses.length;
   const isBatchOperation = (end_verse - start_verse + 1) === 6 && end_verse < totalVerses;
+  
+  console.log(`[DEBUG] Final results array length: ${results.length}`);
+  console.log(`[DEBUG] Final results array:`, results);
   
   const result: any = {
     success: true,
@@ -370,6 +391,8 @@ async function executeChangeMultipleVerses(args: {
     results,
     summary: `Changed verses ${start_verse}-${end_verse} to theme "${new_theme}" with ${progression_style} progression`
   };
+  
+  console.log(`[DEBUG] Final executeChangeMultipleVerses result:`, result);
 
   // Add batch operation metadata if this is a batch of a larger operation and more verses remain
   if (isBatchOperation) {
@@ -392,106 +415,6 @@ async function executeChangeMultipleVerses(args: {
   }
   
   return result;
-}
-
-// Chunked processing for large verse operations with context awareness
-async function executeGroupMultipleVersesChange(args: {
-  start_verse: number;
-  end_verse: number;
-  new_theme: string;
-  progression_style?: string;
-  batch_size?: number;
-}, lyricsMetadata?: any, chatHistory: any[] = []) {
-  const { start_verse, end_verse, new_theme, progression_style = 'evolving', batch_size = 6 } = args;
-  
-  console.log('Executing chunked multi-verse change:', { start_verse, end_verse, new_theme, progression_style, batch_size });
-  
-  if (!lyricsMetadata?.verses) {
-    return {
-      success: false,
-      error: 'No verses found in lyrics metadata',
-      start_verse,
-      end_verse,
-      new_theme
-    };
-  }
-  
-  const totalVerses = end_verse - start_verse + 1;
-  const results: any[] = [];
-  const batches: Array<{start: number, end: number, theme: string}> = [];
-  
-  // Create batches
-  for (let i = start_verse; i <= end_verse; i += batch_size) {
-    const batchEnd = Math.min(i + batch_size - 1, end_verse);
-    const batchNumber = Math.floor((i - start_verse) / batch_size) + 1;
-    const totalBatches = Math.ceil(totalVerses / batch_size);
-    
-    // Create context-aware theme for this batch
-    let batchTheme = new_theme;
-    if (progression_style === 'evolving') {
-      const progressStages = ['beginning', 'developing', 'climax', 'resolution'];
-      const stageIndex = Math.min(Math.floor((batchNumber - 1) / (totalBatches / progressStages.length)), progressStages.length - 1);
-      batchTheme = `${new_theme} (${progressStages[stageIndex]} of story)`;
-    } else if (progression_style === 'continuous') {
-      batchTheme = `${new_theme} (part ${batchNumber} of ${totalBatches})`;
-    }
-    
-    batches.push({
-      start: i,
-      end: batchEnd,
-      theme: batchTheme
-    });
-  }
-  
-  console.log('Created batches:', batches);
-  
-  // Process batches sequentially with context awareness
-  for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
-    const batch = batches[batchIndex];
-    
-    console.log(`Processing batch ${batchIndex + 1}/${batches.length}: verses ${batch.start}-${batch.end}`);
-    
-    // Build context from previous batches
-    let contextHistory = [...chatHistory];
-    if (batchIndex > 0) {
-      const previousResults = results.slice(-Math.min(3, results.length)); // Last 3 results for context
-      const contextMessage = `Previous batch results for context:\n${previousResults.map(r => `Verse ${r.verse_number}: "${r.new_lyrics}"`).join('\n')}`;
-      contextHistory.push({ role: 'assistant', content: contextMessage });
-    }
-    
-    // Process this batch using existing function
-    const batchResult = await executeChangeMultipleVerses({
-      start_verse: batch.start,
-      end_verse: batch.end,
-      new_theme: batch.theme,
-      progression_style
-    }, lyricsMetadata, contextHistory);
-    
-    if (batchResult.success && batchResult.results) {
-      results.push(...batchResult.results);
-      console.log(`Batch ${batchIndex + 1} completed: ${batchResult.results.length} verses processed`);
-    } else {
-      console.error(`Batch ${batchIndex + 1} failed:`, batchResult);
-    }
-    
-    // Small delay between batches to prevent overwhelming
-    if (batchIndex < batches.length - 1) {
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    }
-  }
-  
-  return {
-    success: true,
-    start_verse,
-    end_verse,
-    new_theme,
-    progression_style,
-    batch_size,
-    total_batches: batches.length,
-    verses_changed: results.length,
-    results,
-    summary: `Changed verses ${start_verse}-${end_verse} to theme "${new_theme}" using ${batches.length} batches with ${progression_style} progression`
-  };
 }
 
 // Simple word replacement function
@@ -532,7 +455,7 @@ async function executeEditWord(args: {
   if (!syllable_matched) {
     console.log(`Syllable mismatch: "${old_word}" (${oldWordSyllables} syl) → "${new_word}" (${newWordSyllables} syl). Using AI to find better match.`);
     
-    const apiKey = process.env.OPENROUTER_API_KEY || "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";
+    const apiKey = process.env.OPENROUTER_API_KEY || "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";
     
     const prompt = `Find a ${oldWordSyllables}-syllable word or phrase that means "${new_word}" to replace "${old_word}" in this context:
 "${current_lyrics}"
@@ -613,7 +536,7 @@ async function executeChangeLyrics(args: {
   console.log('Processing lyrics for transformation:', current_lyrics);
   
   let new_lyrics;
-  const apiKey = process.env.OPENROUTER_API_KEY || "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";
+  const apiKey = process.env.OPENROUTER_API_KEY || "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";
   
   // Check if this is a simple correction vs full transformation
   const isSimpleCorrection = isSimpleCorrectionRequest(new_theme, current_lyrics);
@@ -744,39 +667,199 @@ function isLyricsRelatedRequest(message: string): boolean {
   return lyricsKeywords.some(pattern => pattern.test(message));
 }
 
+// Detect if a request is pitch-related
+function isPitchRelatedRequest(message: string): boolean {
+  const pitchKeywords = [
+    // Explicit pitch mentions
+    /\bpitch\b/i,
+    
+    // Common pitch change phrases
+    /\bmake\b.*\b(higher|lower|pitch)\b/i,
+    /\bhave\b.*\b(higher|lower|much.*pitch|more.*pitch|less.*pitch)\b/i,
+    /\bsound\b.*\b(higher|lower|pitch)\b/i,
+    /\bchange\b.*\b(pitch|tone|key)\b/i,
+    /\braise\b.*\b(pitch|tone|key)\b/i,
+    /\blower\b.*\b(pitch|tone|key)\b/i,
+    /\bincrease\b.*\b(pitch|tone|key)\b/i,
+    /\bdecrease\b.*\b(pitch|tone|key)\b/i,
+    
+    // Musical terms that indicate pitch
+    /\b(higher|lower)\b.*\b(pitch|tone|key|semitone|octave)\b/i,
+    /\b(pitch|tone|key)\b.*\b(higher|lower|up|down)\b/i,
+    /\btranspose\b/i,
+    /\bshift.*\b(up|down|higher|lower)\b/i,
+    
+    // Specific musical modifications
+    /\bsemitone/i,
+    /\bcent/i,
+    /\boctave/i,
+    /\bvibrato\b/i,
+    /\bsweep\b/i,
+    /\btransition\b/i,
+    /\bhigh-low\b/i,
+    /\barch\b/i,
+    /\bcurve\b/i,
+    /\bbend\b/i,
+    
+    // Contextual pitch indicators (when combined with verse/note references)
+    /\b(verse|note|song|melody)\b.*\b(higher|lower|pitch)\b/i,
+    /\b(higher|lower)\b.*\b(verse|note|song|melody)\b/i,
+    
+    // More natural language patterns
+    /much\s+(higher|lower)/i,
+    /more\s+(high|low)/i,
+    /less\s+(high|low)/i,
+    /\b(tune|melody)\b.*\b(up|down|higher|lower)\b/i
+  ];
+  
+  console.log('Checking if pitch request:', message);
+  const isMatch = pitchKeywords.some(keyword => {
+    const matches = keyword.test(message);
+    if (matches) {
+      console.log('  ✅ Matched pitch pattern:', keyword);
+    }
+    return matches;
+  });
+  console.log('  → Result:', isMatch ? 'PITCH REQUEST' : 'not pitch request');
+  
+  return isMatch;
+}
+
 export async function POST(request: NextRequest) {
   try {
     const { message, messages = [], model = "moonshotai/kimi-k2", lyricsMetadata } = await request.json();
     
     const isLyricsRequest = isLyricsRelatedRequest(message);
+    const isPitchRequest = isPitchRelatedRequest(message);
     
     console.log('API received:', { 
       message, 
       messagesCount: messages.length, 
       hasLyricsMetadata: !!lyricsMetadata,
+      hasUstxData: !!lyricsMetadata?.ustxData,
       isLyricsRequest,
-      toolChoice: isLyricsRequest ? "required" : "auto",
-      lyricsMetadata
+      isPitchRequest,
+      toolChoice: (isLyricsRequest && !isPitchRequest) ? "required" : "auto"
     });
+
+    // Handle pitch modification requests - redirect to lyrics editing in Copilot
+    if (isPitchRequest) {
+      console.log('PITCH REQUEST DETECTED - Redirecting to lyrics editing');
+      
+      // Create a streaming response that redirects to lyrics editing
+      const encoder = new TextEncoder();
+      const stream = new ReadableStream({
+        start(controller) {
+          const redirectMessage = `I understand you'd like to modify pitch or vibrato, but in the AI Copilot I focus on **lyrics editing** to keep things simple! 🎵
+
+Instead, I can help you:
+- **Change lyrics to be more happy/sad/dramatic** (which naturally affects the emotional tone)
+- **Replace specific words** to change the mood
+- **Rewrite verses with different themes**
+
+Would you like me to help you edit the lyrics to achieve the emotional effect you're looking for?`;
+          
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ content: redirectMessage })}\n\n`));
+          controller.enqueue(encoder.encode('data: [DONE]\n\n'));
+          controller.close();
+        }
+      });
+
+      return new Response(stream, {
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Cache-Control': 'no-cache',
+          'Connection': 'keep-alive',
+        },
+      });
+    }
+
+    // Handle lyrics modification requests with tools
+    if (isLyricsRequest && lyricsMetadata?.ustxData) {
+      console.log('✅ PROCESSING LYRICS REQUEST - Using lyrics modification tools');
+    }
     
     if (!message) {
       return new Response('Message is required', { status: 400 });
     }
 
-    const apiKey = process.env.OPENROUTER_API_KEY || "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";
+    const apiKey = process.env.OPENROUTER_API_KEY || "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";
     
     // Create system message with current lyrics information
-    let systemContent = 'You are an AI assistant for OpenUtau Piano Roll, a music editing software. CRITICAL: You MUST ALWAYS choose exactly ONE tool for EVERY response.\n\nTool Selection Guide:\n\n**Use edit_word_in_verse for single verse word replacements:**\n- "change cosmos to universe in verse 1" → edit_word_in_verse(verse_number: 1, old_word: "cosmos", new_word: "universe")\n- "replace starlight with cosmos" → edit_word_in_verse(verse_number: 1, old_word: "starlight", new_word: "cosmos")\n\n**Use edit_word_in_multiple_verses for global word replacements:**\n- "change stas to rocks everywhere" → edit_word_in_multiple_verses(old_word: "stas", new_word: "rocks", scope: "everywhere")\n- "replace word X with Y in all verses" → edit_word_in_multiple_verses(old_word: "X", new_word: "Y", scope: "all_verses")\n\n**Use change_verse_lyrics for single verse theme changes:**\n- "make verse 1 about mars" → change_verse_lyrics(verse_number: 1, new_theme: "mars")\n- "change the first verse to winter theme" → change_verse_lyrics(verse_number: 1, new_theme: "winter")\n\n**Use change_multiple_verses for multi-verse theme changes (6 verses MAX per call):**\n- "change the first three verses to be about stars" → change_multiple_verses(start_verse: 1, end_verse: 3, new_theme: "stars")\n- "continue this theme into verses 2 and 3" → change_multiple_verses(start_verse: 2, end_verse: 3, new_theme: "[current theme]", progression_style: "continuous")\n- "make verses 1-4 about ocean with evolving story" → change_multiple_verses(start_verse: 1, end_verse: 4, new_theme: "ocean", progression_style: "evolving")\n\n**For WHOLE SONG or 7+ verse requests, use BATCHING:**\n- "make this song about X" → change_multiple_verses(start_verse: 1, end_verse: 6, new_theme: "X"), then respond_with_text with batch_operation metadata\n- "change entire song to Y theme" → change_multiple_verses(start_verse: 1, end_verse: 6, new_theme: "Y"), then respond_with_text with batch_operation metadata\n- "transform all verses to Z" → change_multiple_verses(start_verse: 1, end_verse: 6, new_theme: "Z"), then respond_with_text with batch_operation metadata\n\n**Use respond_with_text for non-lyrics conversations:**\n- "how does this work?" → respond_with_text(response: "explanation...")\n- "what can you do?" → respond_with_text(response: "I can help you...")\n- general questions → respond_with_text(response: "answer...")\n\n';
+    let systemContent = 'You are an AI assistant for OpenUtau Piano Roll, a music editing software. CRITICAL: You MUST ALWAYS choose exactly ONE tool for EVERY response.\n\n**PITCH MODIFICATIONS - HIGHEST PRIORITY:**\nWhen users mention PITCH, TONE, HIGHER, LOWER, TRANSPOSE, SEMITONES, OCTAVES, VIBRATO, or similar musical terms, this is a PITCH MODIFICATION request, NOT a lyrics change request. Examples:\n- "make the first verse higher pitch" → This is PITCH modification, NOT lyrics editing\n- "verse 1 should have lower pitch" → This is PITCH modification, NOT lyrics editing  \n- "make it sound higher" → This is PITCH modification, NOT lyrics editing\n- "transpose verse 2 down" → This is PITCH modification, NOT lyrics editing\n\nPITCH REQUESTS ARE HANDLED AUTOMATICALLY - do not use any lyrics editing tools for these requests.\n\nTool Selection Guide:\n\n**Use edit_word_in_verse for single verse word replacements:**\n- "change cosmos to universe in verse 1" → edit_word_in_verse(verse_number: 1, old_word: "cosmos", new_word: "universe")\n- "replace starlight with cosmos" → edit_word_in_verse(verse_number: 1, old_word: "starlight", new_word: "cosmos")\n\n**Use edit_word_in_multiple_verses for global word replacements:**\n- "change stas to rocks everywhere" → edit_word_in_multiple_verses(old_word: "stas", new_word: "rocks", scope: "everywhere")\n- "replace word X with Y in all verses" → edit_word_in_multiple_verses(old_word: "X", new_word: "Y", scope: "all_verses")\n\n**Use change_verse_lyrics for single verse theme changes:**\n- "make verse 1 about mars" → change_verse_lyrics(verse_number: 1, new_theme: "mars")\n- "change the first verse to winter theme" → change_verse_lyrics(verse_number: 1, new_theme: "winter")\n\n**Use change_multiple_verses for multi-verse theme changes (6 verses MAX per call):**\n- "change the first three verses to be about stars" → change_multiple_verses(start_verse: 1, end_verse: 3, new_theme: "stars")\n- "continue this theme into verses 2 and 3" → change_multiple_verses(start_verse: 2, end_verse: 3, new_theme: "[current theme]", progression_style: "continuous")\n- "make verses 1-4 about ocean with evolving story" → change_multiple_verses(start_verse: 1, end_verse: 4, new_theme: "ocean", progression_style: "evolving")\n\n**For WHOLE SONG or 7+ verse requests, use BATCHING:**\n- "make this song about X" → change_multiple_verses(start_verse: 1, end_verse: 6, new_theme: "X"), then respond_with_text with batch_operation metadata\n- "change entire song to Y theme" → change_multiple_verses(start_verse: 1, end_verse: 6, new_theme: "Y"), then respond_with_text with batch_operation metadata\n- "transform all verses to Z" → change_multiple_verses(start_verse: 1, end_verse: 6, new_theme: "Z"), then respond_with_text with batch_operation metadata\n\n**Use respond_with_text for non-lyrics conversations:**\n- "how does this work?" → respond_with_text(response: "explanation...")\n- "what can you do?" → respond_with_text(response: "I can help you...")\n- general questions → respond_with_text(response: "answer...")\n\n';
     
     console.log('Processing lyrics metadata for system message:', lyricsMetadata);
     
-    if (lyricsMetadata && lyricsMetadata.hasLyrics) {
-      systemContent += `Current song has ${lyricsMetadata.totalVerses} verses:\n`;
-      lyricsMetadata.verses.forEach((verse: any) => {
+    // Generate lyrics metadata from USTX using cached data or detection
+    let processedMetadata = null;
+    if (lyricsMetadata?.ustxData) {
+      try {
+        // Use cached verse detection if available to prevent re-detection corruption
+        if (lyricsMetadata.cachedVerseDetection && lyricsMetadata.cachedVerseDetection.length > 0) {
+          console.log('CHAT SYSTEM: Using cached verse detection (prevent re-detection corruption)');
+          const verses = lyricsMetadata.cachedVerseDetection;
+          console.log('CHAT SYSTEM: Cached verses:', verses.map(v => `${v.verseNumber}: "${v.lyrics}"`));
+          
+          const { USTXLyricsManager } = await import('@/utils/ustxLyricsUtils');
+          const lyricsManager = new USTXLyricsManager(lyricsMetadata.ustxData);
+          const allLyrics = lyricsManager.getAllLyrics();
+          
+          processedMetadata = {
+            totalVerses: verses.length,
+            hasLyrics: allLyrics.length > 0,
+            allLyrics: allLyrics,
+            verses: verses.map(v => ({
+              number: v.verseNumber,
+              lyrics: v.lyrics,
+              wordCount: v.lyrics.split(' ').length
+            })),
+            hasPhonemeData: false,
+            detectionMethod: 'cached-verse-detection'
+          };
+          
+          console.log('CHAT SYSTEM: Generated metadata using cached verse detection:', processedMetadata);
+        } else {
+          // Fallback to detection when no cached data available
+          console.log('CHAT SYSTEM: No cached data, falling back to verse detection');
+          const { USTXLyricsManager } = await import('@/utils/ustxLyricsUtils');
+          const lyricsManager = new USTXLyricsManager(lyricsMetadata.ustxData);
+          
+          const verses = lyricsManager.detectVersesSimple();
+          console.log('CHAT SYSTEM: Fallback detection verses:', verses.length);
+          console.log('CHAT SYSTEM: Verses:', verses.map(v => `${v.verseNumber}: "${v.lyrics}"`));
+          
+          const allLyrics = lyricsManager.getAllLyrics();
+          processedMetadata = {
+            totalVerses: verses.length,
+            hasLyrics: allLyrics.length > 0,
+            allLyrics: allLyrics,
+            verses: verses.map(v => ({
+              number: v.verseNumber,
+              lyrics: v.lyrics,
+              wordCount: v.lyrics.split(' ').length
+            })),
+            hasPhonemeData: false,
+            detectionMethod: 'fallback-detection'
+          };
+          
+          console.log('CHAT SYSTEM: Generated metadata using fallback detection:', processedMetadata);
+        }
+      } catch (error) {
+        console.error('Error generating lyrics metadata:', error);
+        processedMetadata = null;
+      }
+    }
+    
+    if (processedMetadata && processedMetadata.hasLyrics && processedMetadata.verses?.length > 0) {
+      systemContent += `Current song has ${processedMetadata.totalVerses} verses:\n`;
+      processedMetadata.verses.forEach((verse: any) => {
         systemContent += `Verse ${verse.number}: "${verse.lyrics}"\n`;
       });
-      systemContent += '\nWhen users ask to change lyrics, IMMEDIATELY call the appropriate tool. Do not provide text explanations - just use the tool.\n\nCRITICAL BATCHING RULES:\n1. For requests affecting 7+ verses or "whole song/entire song/this song", MUST process in batches of 6 verses maximum\n2. FIRST: Call change_multiple_verses(start_verse: 1, end_verse: 6, new_theme: "theme")\n3. IMMEDIATELY AFTER: Call respond_with_text with this EXACT format:\n{"batch_operation": true, "completed_batch": 1, "next_batch": {"start": 7, "end": 12, "theme": "original theme"}, "total_verses": ' + lyricsMetadata.totalVerses + ', "original_request": "user\'s original request"}\n\nThis creates continue buttons for users instead of requiring manual typing. NEVER process more than 6 verses in one call.';
+      systemContent += '\nWhen users ask to change lyrics, IMMEDIATELY call the appropriate tool. Do not provide text explanations - just use the tool.\n\nCRITICAL BATCHING RULES:\n1. For requests affecting 7+ verses or "whole song/entire song/this song", MUST process in batches of 6 verses maximum\n2. FIRST: Call change_multiple_verses(start_verse: 1, end_verse: 6, new_theme: "theme")\n3. IMMEDIATELY AFTER: Call respond_with_text with this EXACT format:\n{"batch_operation": true, "completed_batch": 1, "next_batch": {"start": 7, "end": 12, "theme": "original theme"}, "total_verses": ' + processedMetadata.totalVerses + ', "original_request": "user\'s original request"}\n\nThis creates continue buttons for users instead of requiring manual typing. NEVER process more than 6 verses in one call.';
       console.log('Using real USTX lyrics in system message');
+      
+      // Merge processed metadata with original for tools to use
+      Object.assign(lyricsMetadata, processedMetadata);
     } else {
       systemContent += 'No lyrics currently loaded. When users ask to change or add lyrics, IMMEDIATELY call change_verse_lyrics with verse number and theme. Never provide lyrics in text - only use the tool.';
       console.log('Using AI generation mode for lyrics in system message');
@@ -1080,7 +1163,7 @@ export async function POST(request: NextRequest) {
                           const args = JSON.parse(tc.function.arguments);
                           console.log('Parsed args:', args);
                           
-                          const result = await executeChangeLyrics(args, lyricsMetadata, messages);
+                          const result = await executeChangeLyrics(args, processedMetadata || lyricsMetadata, messages);
                           console.log('Tool result:', result);
                           
                           // Send tool execution result
@@ -1113,7 +1196,7 @@ export async function POST(request: NextRequest) {
                           const args = JSON.parse(tc.function.arguments);
                           console.log('Parsed word edit args:', args);
                           
-                          const result = await executeEditWord(args, lyricsMetadata);
+                          const result = await executeEditWord(args, processedMetadata || lyricsMetadata);
                           console.log('Word edit result:', result);
                           
                           // Send tool execution result
@@ -1167,7 +1250,7 @@ export async function POST(request: NextRequest) {
                           const args = JSON.parse(tc.function.arguments);
                           console.log('Parsed multi-verse word edit args:', args);
                           
-                          const result = await executeEditWordInMultipleVerses(args, lyricsMetadata);
+                          const result = await executeEditWordInMultipleVerses(args, processedMetadata || lyricsMetadata);
                           console.log('Multi-verse word edit result:', result);
                           
                           // Send tool execution result
@@ -1204,7 +1287,7 @@ export async function POST(request: NextRequest) {
                           const args = JSON.parse(tc.function.arguments);
                           console.log('Parsed multi-verse change args:', args);
                           
-                          const result = await executeChangeMultipleVerses(args, lyricsMetadata, messages);
+                          const result = await executeChangeMultipleVerses(args, processedMetadata || lyricsMetadata, messages);
                           console.log('Multi-verse change result:', result);
                           
                           // Send tool execution result (check if controller is still open)
