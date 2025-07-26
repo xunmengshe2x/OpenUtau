@@ -1,9 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { USTXData, USTXNote } from '@/types/openutau';
+import { USTXData } from '@/types/openutau';
 import { spawn } from 'child_process';
 import { writeFile, readFile, unlink } from 'fs/promises';
+import { writeFileSync, readFileSync, existsSync } from 'fs';
 import { join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
+import { segmentCache } from '@/utils/segmentCache';
 
 interface SegmentRenderRequest {
   ustxData: USTXData;
@@ -21,16 +23,117 @@ interface SegmentRenderRequest {
 
 export async function POST(request: NextRequest) {
   try {
-    const { ustxData, singerId, startNoteIndex, endNoteIndex, lineIndex, qualitySettings }: SegmentRenderRequest = await request.json();
+    const requestBody = await request.json();
+    const { ustxData, singerId, startNoteIndex, endNoteIndex, lineIndex, qualitySettings }: SegmentRenderRequest = requestBody;
 
-    if (!ustxData) {
-      return NextResponse.json({ error: 'USTX data is required' }, { status: 400 });
+    if (!ustxData || !singerId || startNoteIndex == null || endNoteIndex == null) {
+      return NextResponse.json({ error: 'Missing required parameters' }, { status: 400 });
     }
 
-    // Create a segment USTX with only the specified notes
-    const segmentUSTX = createSegmentUSTX(ustxData, startNoteIndex, endNoteIndex);
+    // Step 1: Get phrase data using the existing phrases API with retry logic
+    console.log('Getting phrase data from existing phrases API...');
     
-    // Generate temporary file paths (use OpenUtau directory like main render API)
+    let phrasesResponse: Response | null = null;
+    const maxRetries = 3;
+    const retryDelay = 1000; // 1 second
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        console.log(`Phrases API attempt ${attempt}/${maxRetries}...`);
+        // Try both ports 3000 and 3001 since server might be on either
+        const port = attempt === 1 ? 3001 : (attempt === 2 ? 3000 : 3002);
+        phrasesResponse = await fetch(`http://localhost:${port}/api/phrases`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ustxData, singerId }),
+          signal: AbortSignal.timeout(30000) // 30 second timeout
+        });
+        
+        if (phrasesResponse.ok) {
+          console.log(`Phrases API succeeded on attempt ${attempt}`);
+          break;
+        } else {
+          console.log(`Phrases API returned status ${phrasesResponse.status} on attempt ${attempt}`);
+          if (attempt < maxRetries) {
+            await new Promise(resolve => setTimeout(resolve, retryDelay));
+          }
+        }
+      } catch (e) {
+        const errorMessage = e instanceof Error ? e.message : String(e);
+        console.log(`Phrases API error on attempt ${attempt}:`, errorMessage);
+        if (attempt < maxRetries) {
+          await new Promise(resolve => setTimeout(resolve, retryDelay));
+        } else {
+          throw new Error(`Failed to connect to phrases API after ${maxRetries} attempts: ${errorMessage}`);
+        }
+      }
+    }
+    
+    if (!phrasesResponse) {
+      throw new Error('Phrases API returned no response after all retries');
+    }
+
+    if (!phrasesResponse.ok) {
+      throw new Error('Failed to get phrases from phrases API');
+    }
+
+    const phrasesData = await phrasesResponse.json();
+    console.log(`Got ${phrasesData.phrases?.length || 0} phrases from phrases API`);
+
+    if (!phrasesData.phrases || phrasesData.phrases.length === 0) {
+      throw new Error('No phrases returned from phrases API');
+    }
+
+    // Step 2: Map lineIndex to phrase numbers - render only the selected phrase
+    let targetPhraseNumbers: number[] = [];
+    
+    if (lineIndex !== undefined && phrasesData.phrases) {
+      // Map lineIndex to phrase number - render only the selected phrase
+      const phraseIndex = Math.min(Math.max(0, lineIndex), phrasesData.phrases.length - 1);
+      targetPhraseNumbers.push(phraseIndex + 1); // CLI uses 1-based phrase numbers
+    } else {
+      // Fallback: render first phrase only
+      targetPhraseNumbers = [1];
+    }
+
+    // Remove duplicates and keep only valid phrase numbers
+    targetPhraseNumbers = [...new Set(targetPhraseNumbers)].filter(n => n >= 1 && n <= phrasesData.phrases.length);
+    
+    console.log(`Rendering phrases: ${targetPhraseNumbers.join(', ')} for lineIndex ${lineIndex}`);
+
+    // Step 3: Check if segment is already cached
+    const qualityMode = qualitySettings ? 'custom' : 'standard';
+    const cachedSegmentPath = await segmentCache.isSegmentCached(
+      ustxData, 
+      targetPhraseNumbers, 
+      singerId, 
+      qualityMode
+    );
+
+    if (cachedSegmentPath) {
+      // Return cached segment
+      console.log(`🚀 Returning cached segment from ${cachedSegmentPath}`);
+      const cachedAudioBuffer = await readFile(cachedSegmentPath);
+      
+      return new NextResponse(cachedAudioBuffer, {
+        status: 200,
+        headers: {
+          'Content-Type': 'audio/wav',
+          'Content-Length': cachedAudioBuffer.length.toString(),
+          'Cache-Control': 'public, max-age=86400', // Cache for 24 hours
+          'X-Segment-Info': JSON.stringify({
+            method: 'cached-segment',
+            phrasesRendered: targetPhraseNumbers,
+            totalPhrases: phrasesData.phrases.length,
+            lineIndex,
+            targetNotes: `${startNoteIndex}-${endNoteIndex}`,
+            cached: true
+          })
+        },
+      });
+    }
+
+    // Step 4: Render segment if not cached
     const openUtauDir = '/workspaces/OpenUtau';
     const tempId = uuidv4();
     const ustxPath = join(openUtauDir, `segment_${tempId}.ustx`);
@@ -38,86 +141,106 @@ export async function POST(request: NextRequest) {
     const outputJson = join(openUtauDir, `segment_${tempId}.json`);
 
     try {
-      // Write segment USTX to temporary file (as JSON like main API)
-      await writeFile(ustxPath, JSON.stringify(segmentUSTX, null, 2));
+      // Write the USTX file
+      await writeFile(ustxPath, JSON.stringify(ustxData, null, 2));
 
-      // Build CLI command with quality settings
-      let cliCommand = `rm -rf /home/codespace/.cache/OpenUtau/* && dotnet run --project OpenUtau.Cli -- ${ustxPath} ${singerId} ${outputJson} ${outputWav} --reset-timings --preserve-silence-timing`;
+      let renderCommand = `rm -rf /home/codespace/.cache/OpenUtau/* && dotnet run --project OpenUtau.Cli -- ${ustxPath} ${singerId} ${outputJson} ${outputWav} --reset-timings --phoneme-override dream:0:d:jh --render-phrases ${targetPhraseNumbers.join(',')} --trim-leading-silence`;
       
-      // Add DiffSinger quality parameters if provided
-      if (qualitySettings) {
-        cliCommand += ` --diffsinger-depth ${qualitySettings.diffSingerDepth}`;
-        cliCommand += ` --diffsinger-steps ${qualitySettings.diffSingerSteps}`;
-        cliCommand += ` --diffsinger-steps-pitch ${qualitySettings.diffSingerStepsPitch}`;
-        cliCommand += ` --diffsinger-steps-variance ${qualitySettings.diffSingerStepsVariance}`;
+      if (qualitySettings?.diffSingerDepth !== undefined) {
+        renderCommand += ` --diffsinger-depth ${qualitySettings.diffSingerDepth}`;
+        renderCommand += ` --diffsinger-steps ${qualitySettings.diffSingerSteps}`;
+        renderCommand += ` --diffsinger-steps-pitch ${qualitySettings.diffSingerStepsPitch}`;
+        renderCommand += ` --diffsinger-steps-variance ${qualitySettings.diffSingerStepsVariance}`;
       }
 
-      // Render the segment using OpenUtau CLI
-      const cliProcess = spawn('bash', [
-        '-c',
-        cliCommand
-      ], {
+      console.log('Rendering specific phrases:', renderCommand);
+
+      const renderProcess = spawn('bash', ['-c', renderCommand], {
         cwd: '/workspaces/OpenUtau'
       });
 
-      let stdout = '';
-      let stderr = '';
-
-      cliProcess.stdout.on('data', (data) => {
-        stdout += data.toString();
-      });
-
-      cliProcess.stderr.on('data', (data) => {
-        stderr += data.toString();
-      });
-
-      // Wait for rendering to complete
       await new Promise<void>((resolve, reject) => {
-        cliProcess.on('close', (code) => {
-          console.log('Segment render stdout:', stdout);
-          console.log('Segment render stderr:', stderr);
+        let stderr = '';
+        let stdout = '';
+        renderProcess.stdout.on('data', (data) => stdout += data.toString());
+        renderProcess.stderr.on('data', (data) => stderr += data.toString());
+        renderProcess.on('close', (code) => {
+          console.log(`[RENDER-SEGMENT] Process exited with code: ${code}`);
+          console.log(`[RENDER-SEGMENT] Stdout (last 500 chars): ${stdout.slice(-500)}`);
+          console.log(`[RENDER-SEGMENT] Stderr (last 500 chars): ${stderr.slice(-500)}`);
+          
+          // Filter out ONNX runtime warnings which are not actual errors
+          const filteredStderr = stderr
+            .split('\n')
+            .filter(line => !line.includes('CleanUnusedInitializersAndNodeArgs'))
+            .filter(line => !line.includes('onnxruntime'))
+            .filter(line => !line.includes('Removing initializer'))
+            .filter(line => !line.includes('OMP: Info'))
+            .filter(line => !line.includes('Warning: '))
+            .filter(line => line.trim().length > 0)
+            .join('\n')
+            .trim();
+          
+          console.log(`[RENDER-SEGMENT] Filtered stderr: "${filteredStderr}"`);
+          console.log(`[RENDER-SEGMENT] Command was: ${renderCommand}`);
           
           if (code === 0) {
+            console.log(`[RENDER-SEGMENT] ✅ Success - resolving`);
             resolve();
           } else {
-            reject(new Error(`Segment rendering failed with code ${code}. Stderr: ${stderr}`));
+            console.log(`[RENDER-SEGMENT] ❌ Failed with code ${code}`);
+            // Only report filtered stderr as the error
+            const errorMessage = filteredStderr || `Process exited with code ${code}`;
+            reject(new Error(`Phrase rendering failed: ${errorMessage}`));
           }
         });
-
-        cliProcess.on('error', (error) => {
-          console.error('Segment render process error:', error);
-          reject(error);
-        });
+        renderProcess.on('error', reject);
       });
 
-      // Read the rendered audio file
+      // Step 5: Read rendered audio and cache it
       const audioBuffer = await readFile(outputWav);
       
-      // Clean up temporary files
+      // Cache the rendered segment for future use
+      await segmentCache.cacheSegment(
+        ustxData,
+        targetPhraseNumbers,
+        singerId,
+        audioBuffer,
+        qualityMode,
+        startNoteIndex,
+        endNoteIndex
+      );
+      
+      // IMPORTANT: Also save this segment for full song integration
+      await saveSegmentForFullSongIntegration(audioBuffer, lineIndex ?? 0, ustxData, startNoteIndex, endNoteIndex);
+      
+      // Cleanup temporary files
       await Promise.all([
         unlink(ustxPath).catch(() => {}),
         unlink(outputWav).catch(() => {}),
         unlink(outputJson).catch(() => {})
       ]);
 
-      // Return the audio as a blob
       return new NextResponse(audioBuffer, {
         status: 200,
         headers: {
           'Content-Type': 'audio/wav',
           'Content-Length': audioBuffer.length.toString(),
-          'Cache-Control': 'no-cache',
+          'Cache-Control': 'public, max-age=86400', // Cache for 24 hours since we have smart cache invalidation
           'X-Segment-Info': JSON.stringify({
-            startNoteIndex,
-            endNoteIndex,
+            method: 'targeted-phrase-rendering',
+            phrasesRendered: targetPhraseNumbers,
+            totalPhrases: phrasesData.phrases.length,
             lineIndex,
-            noteCount: endNoteIndex - startNoteIndex + 1
+            targetNotes: `${startNoteIndex}-${endNoteIndex}`,
+            cached: false,
+            freshlyRendered: true
           })
         },
       });
 
     } catch (error) {
-      // Clean up files on error
+      // Cleanup on error
       await Promise.all([
         unlink(ustxPath).catch(() => {}),
         unlink(outputWav).catch(() => {}),
@@ -128,53 +251,137 @@ export async function POST(request: NextRequest) {
 
   } catch (error) {
     console.error('Segment render error:', error);
-    return NextResponse.json(
-      { 
-        error: 'Failed to render segment',
-        details: error instanceof Error ? error.message : 'Unknown error'
-      },
-      { status: 500 }
-    );
+    return NextResponse.json({ 
+      error: 'Failed to render segment',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    }, { status: 500 });
   }
 }
 
-function createSegmentUSTX(originalUSTX: USTXData, startNoteIndex: number, endNoteIndex: number): USTXData {
-  // Get all notes from all voice parts
-  const allNotes: USTXNote[] = [];
-  originalUSTX.voice_parts?.forEach(part => {
-    part.notes?.forEach(note => {
-      allNotes.push(note);
-    });
-  });
-
-  // Extract the segment notes
-  const segmentNotes = allNotes.slice(startNoteIndex, endNoteIndex + 1);
-  
-  if (segmentNotes.length === 0) {
-    throw new Error('No notes in specified segment');
-  }
-
-  // Adjust positions to start from 0
-  const startPosition = segmentNotes[0].position;
-  const adjustedNotes = segmentNotes.map(note => ({
-    ...note,
-    position: note.position - startPosition
-  }));
-
-  // Create segment USTX
-  const segmentUSTX: USTXData = {
-    ...originalUSTX,
-    name: `${originalUSTX.name} - Segment`,
-    voice_parts: [
-      {
-        name: 'Segment',
-        comment: `Notes ${startNoteIndex}-${endNoteIndex}`,
-        track_no: 0,
-        position: 0,
-        notes: adjustedNotes
+/**
+ * Save the rendered segment for full song integration
+ * This ensures that when the full song is played, it includes the updated segment
+ */
+async function saveSegmentForFullSongIntegration(
+  audioBuffer: Buffer,
+  lineIndex: number,
+  ustxData: any,
+  startNoteIndex: number,
+  endNoteIndex: number
+): Promise<void> {
+  try {
+    console.log(`💾 [SEGMENT-SAVE] Starting segment ${lineIndex} for full song integration...`);
+    console.log(`💾 [SEGMENT-SAVE] Audio buffer size: ${audioBuffer.length} bytes`);
+    console.log(`💾 [SEGMENT-SAVE] USTX data name: "${ustxData?.name}"`);
+    
+    // Determine template name from USTX data
+    let templateName = 'still_here_original'; // Default fallback
+    if (ustxData?.name) {
+      const baseName = ustxData.name.replace(/\s+/g, '_').toLowerCase();
+      console.log(`💾 [SEGMENT-SAVE] Base name from USTX: "${baseName}"`);
+      // Map the USTX name to the correct template name
+      if (baseName === 'still_here') {
+        templateName = 'still_here_original';
+      } else {
+        templateName = baseName;
       }
-    ]
-  };
-
-  return segmentUSTX;
+    }
+    console.log(`💾 [SEGMENT-SAVE] Using template name: "${templateName}"`);
+    
+    // Map lineIndex to verse number (lineIndex is 0-based, verse numbers are 1-based)
+    const verseNumber = lineIndex + 1;
+    console.log(`💾 [SEGMENT-SAVE] LineIndex ${lineIndex} -> Verse ${verseNumber}`);
+    
+    // Create the segment updates directory
+    // Fix: Use the same path as openutau-mix API uses
+    const segmentDir = join('/workspaces/OpenUtau', '.segment_updates', templateName);
+    const segmentFile = join(segmentDir, `verse_${verseNumber}.wav`);
+    console.log(`💾 [SEGMENT-SAVE] Segment directory: ${segmentDir}`);
+    console.log(`💾 [SEGMENT-SAVE] Segment file: ${segmentFile}`);
+    
+    // Create directory if it doesn't exist
+    const fs = require('fs');
+    if (!fs.existsSync(segmentDir)) {
+      console.log(`💾 [SEGMENT-SAVE] Creating directory: ${segmentDir}`);
+      fs.mkdirSync(segmentDir, { recursive: true });
+      console.log(`💾 [SEGMENT-SAVE] Directory created successfully`);
+    } else {
+      console.log(`💾 [SEGMENT-SAVE] Directory already exists: ${segmentDir}`);
+    }
+    
+    // Verify directory was created
+    if (!fs.existsSync(segmentDir)) {
+      throw new Error(`Failed to create segment directory: ${segmentDir}`);
+    }
+    
+    // Save the rendered segment
+    console.log(`💾 [SEGMENT-SAVE] Writing audio file: ${segmentFile}`);
+    writeFileSync(segmentFile, audioBuffer);
+    
+    // Verify file was written
+    if (!existsSync(segmentFile)) {
+      throw new Error(`Failed to write segment file: ${segmentFile}`);
+    }
+    
+    const fileStats = fs.statSync(segmentFile);
+    console.log(`💾 [SEGMENT-SAVE] ✅ Saved segment to: ${segmentFile} (${fileStats.size} bytes)`);
+    
+    // Update the metadata file
+    const metadataFile = join(segmentDir, 'updates.json');
+    console.log(`💾 [SEGMENT-SAVE] Updating metadata file: ${metadataFile}`);
+    
+    let updates: { [key: string]: any } = {};
+    
+    if (existsSync(metadataFile)) {
+      console.log(`💾 [SEGMENT-SAVE] Loading existing updates.json`);
+      try {
+        const existingContent = readFileSync(metadataFile, 'utf8');
+        updates = JSON.parse(existingContent);
+        console.log(`💾 [SEGMENT-SAVE] Existing updates: ${Object.keys(updates).join(', ')}`);
+      } catch (parseError) {
+        console.log(`💾 [SEGMENT-SAVE] Warning: Could not parse existing updates.json, starting fresh`);
+        updates = {};
+      }
+    } else {
+      console.log(`💾 [SEGMENT-SAVE] Creating new updates.json file`);
+    }
+    
+    // Use the format expected by openutau-mix API (verse_1, verse_2, etc.)
+    const updateKey = `verse_${verseNumber}`;
+    updates[updateKey] = {
+      status: 'updated',
+      timestamp: Date.now(),
+      startNoteIndex,
+      endNoteIndex,
+      audioPath: segmentFile,
+      lineIndex // Store original lineIndex for reference
+    };
+    
+    console.log(`💾 [SEGMENT-SAVE] Adding update for key: ${updateKey}`);
+    console.log(`💾 [SEGMENT-SAVE] Update data:`, JSON.stringify(updates[updateKey], null, 2));
+    
+    const updatesJson = JSON.stringify(updates, null, 2);
+    writeFileSync(metadataFile, updatesJson);
+    
+    // Verify metadata file was written
+    if (!existsSync(metadataFile)) {
+      throw new Error(`Failed to write metadata file: ${metadataFile}`);
+    }
+    
+    const metadataStats = fs.statSync(metadataFile);
+    console.log(`💾 [SEGMENT-SAVE] ✅ Metadata file written: ${metadataFile} (${metadataStats.size} bytes)`);
+    
+    // Final verification
+    console.log(`💾 [SEGMENT-SAVE] Final verification:`);
+    console.log(`💾 [SEGMENT-SAVE] - Segment file exists: ${existsSync(segmentFile)}`);
+    console.log(`💾 [SEGMENT-SAVE] - Metadata file exists: ${existsSync(metadataFile)}`);
+    console.log(`💾 [SEGMENT-SAVE] - Updates in metadata: ${Object.keys(updates).join(', ')}`);
+    
+    console.log(`💾 [SEGMENT-SAVE] ✅ SUCCESS: Segment integration saved: verse ${verseNumber} for template ${templateName}`);
+    
+  } catch (error) {
+    console.error('💾 [SEGMENT-SAVE] ❌ ERROR saving segment for full song integration:', error);
+    console.error('💾 [SEGMENT-SAVE] ❌ Error stack:', error instanceof Error ? error.stack : 'No stack available');
+    // Don't throw - this shouldn't break the main render flow, but log the full error details
+  }
 }
