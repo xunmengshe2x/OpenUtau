@@ -1,0 +1,27 @@
+{
+  "verse_4": {
+    "audioPath": "/workspaces/OpenUtau/.segment_cache/segment_7af32b25ff1a8a15.wav",
+    "startNoteIndex": 30,
+    "endNoteIndex": 42,
+    "startTimeMs": 32888.88888888889,
+    "endTimeMs": 40888.88888888889,
+    "durationMs": 8000,
+    "lyrics": "a Love turns to ashes With all that I wish I could say",
+    "phraseNumbers": [
+      4
+    ],
+    "timestamp": 1753539999837,
+    "verseNumber": 4
+  },
+  "_metadata": {
+    "lastUpdated": 1753540409876
+  },
+  "verse_2": {
+    "status": "updated",
+    "timestamp": 1753540409876,
+    "startNoteIndex": 13,
+    "endNoteIndex": 24,
+    "audioPath": "/workspaces/OpenUtau/.segment_updates/still_here_original/verse_2.wav",
+    "lineIndex": 1
+  }
+}

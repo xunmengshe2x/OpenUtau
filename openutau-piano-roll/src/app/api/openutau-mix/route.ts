@@ -54,10 +54,10 @@ export async function GET(request: NextRequest) {
       
       const updates = JSON.parse(readFileSync(updatesFile, 'utf8'));
       
-      // Clean up the updates format - only keep verse_* entries
+      // Clean up the updates format - only keep verse_* entries, but preserve metadata
       const cleanedUpdates: any = {};
       for (const [key, value] of Object.entries(updates)) {
-        if (key.startsWith('verse_')) {
+        if (key.startsWith('verse_') || key === '_metadata') {
           cleanedUpdates[key] = value;
         }
       }
@@ -280,11 +280,14 @@ async function precisionAudioSegmentReplacement(
         continue;
       }
       
-      // Calculate byte positions - use exact timing from verse detection (no breath compensation for now)
+      // Calculate byte positions - using gap clearing instead of breath compensation
       const startTimeMs = verse.startTimeMs;
       const endTimeMs = verse.endTimeMs;
       
       console.log(`📊 Verse ${verseNumber} replacement: ${startTimeMs}ms - ${endTimeMs}ms`);
+      
+      // Clear gap before verse if needed to prevent breath overlap
+      await clearGapBeforeVerse(mixedAudioBuffer, audioInfo, verses, verseNumber);
       
       // Convert time to byte positions (skip WAV header)
       const bytesPerMs = (audioInfo.sampleRate * audioInfo.channels * (audioInfo.bitsPerSample / 8)) / 1000;
@@ -297,16 +300,17 @@ async function precisionAudioSegmentReplacement(
       // Extract replacement audio data (skip WAV header)
       const replacementAudioData = replacementBuffer.slice(replacementInfo.headerSize);
       
-      // Apply fast segment replacement (simplified for performance)
-      console.log(`🚀 Fast segment replacement for verse ${verseNumber}...`);
+      // Timing-based replacement (direct replacement)
+      console.log(`⏰ Timing-based replacement for verse ${verseNumber}...`);
+      await applyTimingBasedReplacement(
+        mixedAudioBuffer,
+        replacementAudioData,
+        startBytePos,
+        segmentLength,
+        verseNumber
+      );
       
-      // Simple direct replacement - much faster
-      const actualReplacementLength = Math.min(segmentLength, replacementAudioData.length);
-      
-      // Direct copy without crossfading for speed
-      replacementAudioData.copy(mixedAudioBuffer, startBytePos, 0, actualReplacementLength);
-      
-      console.log(`✅ Fast replacement completed for verse ${verseNumber} (${actualReplacementLength} bytes)`);
+      console.log(`✅ Replacement completed for verse ${verseNumber}`);
       
       // Add async break to prevent blocking
       await new Promise(resolve => setImmediate(resolve));
@@ -1000,6 +1004,128 @@ async function placeSegmentsInOpenUtauCache(templateName: string, updates: any):
 }
 
 /**
+ * BREATH COMPENSATION FUNCTIONS - Easy revert by setting USE_BREATH_COMPENSATION = false
+ */
+
+function getBreathAwareStartTime(currentVerse: any, allVerses: any[], verseNumber: number): number {
+  console.log(`🔍 Analyzing breath at start of verse ${verseNumber}...`);
+  
+  if (verseNumber === 1) {
+    console.log(`🫁 Verse ${verseNumber}: First verse, using original start time`);
+    return currentVerse.startTimeMs;
+  }
+  
+  // Debug: Show all phonemes at verse start
+  const allPhonemesAtStart = currentVerse.phonemes?.slice(0, 3) || [];
+  console.log(`🔍 First 3 phonemes in verse ${verseNumber}:`, 
+    allPhonemesAtStart.map(p => `${p.phoneme}@${p.positionMs}ms`));
+  
+  // Look for breath phonemes (AP/SP) at the very start of the verse
+  const breathPhonemesAtStart = currentVerse.phonemes?.filter((p: any) => 
+    (p.phoneme === 'AP' || p.phoneme === 'SP') && 
+    Math.abs(p.positionMs - currentVerse.startTimeMs) < 500 // Increased tolerance to 500ms
+  ) || [];
+  
+  console.log(`🔍 Found ${breathPhonemesAtStart.length} breath phonemes near verse ${verseNumber} start`);
+  
+  if (breathPhonemesAtStart.length > 0) {
+    const earliestBreathTime = Math.min(...breathPhonemesAtStart.map((p: any) => p.positionMs));
+    console.log(`🫁 Verse ${verseNumber}: Adjusting start ${currentVerse.startTimeMs}ms → ${earliestBreathTime}ms for breath`);
+    return earliestBreathTime;
+  }
+  
+  console.log(`🫁 Verse ${verseNumber}: No breath adjustment needed at start`);
+  return currentVerse.startTimeMs;
+}
+
+function getBreathAwareEndTime(currentVerse: any, allVerses: any[], verseNumber: number): number {
+  console.log(`🔍 Analyzing breath at end of verse ${verseNumber}...`);
+  
+  const nextVerse = allVerses.find(v => v.verseNumber === verseNumber + 1);
+  if (!nextVerse) {
+    console.log(`🫁 Verse ${verseNumber}: Last verse, using original end time`);
+    return currentVerse.endTimeMs;
+  }
+  
+  // Debug: Show last few phonemes of current verse
+  const lastPhonemes = currentVerse.phonemes?.slice(-3) || [];
+  console.log(`🔍 Last 3 phonemes in verse ${verseNumber}:`, 
+    lastPhonemes.map(p => `${p.phoneme}@${p.positionMs}ms(+${p.durationMs}ms)`));
+  
+  // Debug: Show first few phonemes of next verse  
+  const nextFirstPhonemes = nextVerse.phonemes?.slice(0, 3) || [];
+  console.log(`🔍 First 3 phonemes in verse ${verseNumber + 1}:`, 
+    nextFirstPhonemes.map(p => `${p.phoneme}@${p.positionMs}ms`));
+  
+  // Check for breath overlap between verses
+  const currentVerseBreathAtEnd = currentVerse.phonemes?.filter((p: any) => 
+    (p.phoneme === 'AP' || p.phoneme === 'SP') && 
+    (p.positionMs + p.durationMs) > (currentVerse.endTimeMs - 500) // Within 500ms of verse end
+  ) || [];
+  
+  const nextVerseBreathAtStart = nextVerse.phonemes?.filter((p: any) => 
+    (p.phoneme === 'AP' || p.phoneme === 'SP') && 
+    Math.abs(p.positionMs - nextVerse.startTimeMs) < 500 // Within 500ms of next verse start
+  ) || [];
+  
+  console.log(`🔍 Breath at end of verse ${verseNumber}:`, currentVerseBreathAtEnd.length);
+  console.log(`🔍 Breath at start of verse ${verseNumber + 1}:`, nextVerseBreathAtStart.length);
+  
+  if (currentVerseBreathAtEnd.length > 0 && nextVerseBreathAtStart.length > 0) {
+    // Potential overlap - truncate current verse to avoid double breath
+    const nextBreathStart = Math.min(...nextVerseBreathAtStart.map(p => p.positionMs));
+    const safeEndTime = nextBreathStart - 100; // 100ms buffer
+    console.log(`🫁 Verse ${verseNumber}: OVERLAP DETECTED! Truncating end ${currentVerse.endTimeMs}ms → ${safeEndTime}ms`);
+    return Math.max(safeEndTime, currentVerse.startTimeMs + 1000); // Ensure minimum verse length
+  }
+  
+  console.log(`🫁 Verse ${verseNumber}: No breath overlap detected, using original end time`);
+  return currentVerse.endTimeMs;
+}
+
+/**
+ * Clear the gap before a verse to prevent breath overlap from previous verse
+ */
+async function clearGapBeforeVerse(audioBuffer: Buffer, audioInfo: any, verses: any[], verseNumber: number): Promise<void> {
+  if (verseNumber <= 1) {
+    console.log(`🧹 Verse ${verseNumber}: No gap to clear (first verse)`);
+    return; // No previous verse
+  }
+  
+  const currentVerse = verses.find(v => v.verseNumber === verseNumber);
+  const previousVerse = verses.find(v => v.verseNumber === verseNumber - 1);
+  
+  if (!currentVerse || !previousVerse) {
+    console.log(`🧹 Verse ${verseNumber}: Cannot find verse data for gap clearing`);
+    return;
+  }
+  
+  const gapStartMs = previousVerse.endTimeMs;
+  const gapEndMs = currentVerse.startTimeMs;
+  const gapDurationMs = gapEndMs - gapStartMs;
+  
+  if (gapDurationMs <= 0) {
+    console.log(`🧹 Verse ${verseNumber}: No gap to clear (verses are adjacent)`);
+    return;
+  }
+  
+  console.log(`🧹 Verse ${verseNumber}: Clearing gap ${gapStartMs}ms → ${gapEndMs}ms (${gapDurationMs}ms)`);
+  
+  // Convert time to byte positions
+  const bytesPerMs = (audioInfo.sampleRate * audioInfo.channels * (audioInfo.bitsPerSample / 8)) / 1000;
+  const gapStartByte = audioInfo.headerSize + Math.floor(gapStartMs * bytesPerMs);
+  const gapEndByte = audioInfo.headerSize + Math.floor(gapEndMs * bytesPerMs);
+  const gapLength = gapEndByte - gapStartByte;
+  
+  console.log(`🧹 Clearing audio bytes ${gapStartByte} → ${gapEndByte} (${gapLength} bytes)`);
+  
+  // Fill gap with silence (zeros)
+  audioBuffer.fill(0, gapStartByte, gapEndByte);
+  
+  console.log(`✅ Gap cleared successfully for verse ${verseNumber}`);
+}
+
+/**
  * STEP 2: Create mixed audio with updated segments (simple approach)
  */
 async function triggerNativeOpenUtauRender(templateName: string): Promise<string | null> {
@@ -1226,4 +1352,28 @@ async function setupOpenUtauCache(templateName: string): Promise<void> {
     // Continue anyway - OpenUtau will just render from scratch
   }
 }
+
+/**
+ * METHOD 1: Timing-based replacement (current approach)
+ * Replaces entire verse time range - may cause double breath
+ */
+async function applyTimingBasedReplacement(
+  mixedAudioBuffer: Buffer,
+  replacementAudioData: Buffer,
+  startBytePos: number,
+  segmentLength: number,
+  verseNumber: number
+): Promise<void> {
+  console.log(`⏰ METHOD 1: Timing-based replacement for verse ${verseNumber}`);
+  console.log(`⏰ Replacing entire time range: ${segmentLength} bytes at position ${startBytePos}`);
+  
+  // Simple direct replacement - current working method
+  const actualReplacementLength = Math.min(segmentLength, replacementAudioData.length);
+  
+  // Direct copy without crossfading for speed
+  replacementAudioData.copy(mixedAudioBuffer, startBytePos, 0, actualReplacementLength);
+  
+  console.log(`⏰ Timing-based replacement complete: ${actualReplacementLength} bytes copied`);
+}
+
 
