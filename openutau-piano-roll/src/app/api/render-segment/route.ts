@@ -7,6 +7,10 @@ import { join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { segmentCache } from '@/utils/segmentCache';
 
+// Modal configuration - Use 8-core CPU endpoint (fastest and cheapest)
+const MODAL_RENDER_URL = 'https://wwatashi84--openutau-voice-synthesis-render-segment-cpu.modal.run';
+const USE_MODAL = true; // Set to false to use local CLI
+
 interface SegmentRenderRequest {
   ustxData: USTXData;
   singerId: string;
@@ -99,6 +103,8 @@ export async function POST(request: NextRequest) {
     // Remove duplicates and keep only valid phrase numbers
     targetPhraseNumbers = [...new Set(targetPhraseNumbers)].filter(n => n >= 1 && n <= phrasesData.phrases.length);
     
+    console.log(`🎯 DEBUG: lineIndex=${lineIndex}, phraseLength=${phrasesData.phrases.length}`);
+    console.log(`🎯 DEBUG: targetPhraseNumbers=${JSON.stringify(targetPhraseNumbers)}`);
     console.log(`Rendering phrases: ${targetPhraseNumbers.join(', ')} for lineIndex ${lineIndex}`);
 
     // Step 3: Check if segment is already cached
@@ -133,7 +139,83 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    // Step 4: Render segment if not cached
+    // Step 4: Try Modal first, fallback to local CLI if needed
+    if (USE_MODAL) {
+      try {
+        console.log('🚀 Using Modal 8-core CPU for segment rendering...');
+        console.log(`🎯 DEBUG: Sending to Modal - phraseNumbers=${JSON.stringify(targetPhraseNumbers)}`);
+        
+        const modalResponse = await fetch(MODAL_RENDER_URL, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            ustxData,
+            singerId,
+            phraseNumbers: targetPhraseNumbers[0] || 1, // 8-core CPU endpoint expects single phrase number
+            qualitySettings: qualitySettings || {
+              diffSingerDepth: 1000,
+              diffSingerSteps: 1000,
+              diffSingerStepsPitch: 5,
+              diffSingerStepsVariance: 4
+            }
+          }),
+        });
+
+        const modalResult = await modalResponse.json();
+        
+        if (modalResult.success && modalResult.audio) {
+          console.log(`✅ Modal 8-core CPU segment rendering successful!`);
+          
+          // Decode base64 audio
+          const audioBuffer = Buffer.from(modalResult.audio, 'base64');
+          
+          // Cache the rendered segment for future use
+          await segmentCache.cacheSegment(
+            ustxData,
+            targetPhraseNumbers,
+            singerId,
+            audioBuffer,
+            qualityMode,
+            startNoteIndex,
+            endNoteIndex
+          );
+          
+          // Save segment for full song integration
+          await saveSegmentForFullSongIntegration(audioBuffer, lineIndex ?? 0, ustxData, startNoteIndex, endNoteIndex);
+          
+          return new NextResponse(audioBuffer, {
+            status: 200,
+            headers: {
+              'Content-Type': 'audio/wav',
+              'Content-Length': audioBuffer.length.toString(),
+              'Cache-Control': 'public, max-age=86400',
+              'X-Segment-Info': JSON.stringify({
+                method: 'modal-8core-cpu-render',
+                phrasesRendered: targetPhraseNumbers,
+                totalPhrases: phrasesData.phrases.length,
+                lineIndex,
+                targetNotes: `${startNoteIndex}-${endNoteIndex}`,
+                cached: false,
+                modalRendered: true,
+                endpoint: '8-core-cpu'
+              })
+            },
+          });
+        } else {
+          console.warn('⚠️ Modal 8-core CPU rendering failed, falling back to local CLI:', modalResult.error);
+          // Fall through to local CLI
+        }
+      } catch (error) {
+        console.warn('⚠️ Modal 8-core CPU request failed, falling back to local CLI:', error);
+        // Fall through to local CLI  
+      }
+    }
+
+    console.log('🔄 Using local CLI for segment rendering...');
+
+    // Step 5: Render segment if not cached (local CLI fallback)
     const openUtauDir = '/workspaces/OpenUtau';
     const tempId = uuidv4();
     const ustxPath = join(openUtauDir, `segment_${tempId}.ustx`);
@@ -144,7 +226,15 @@ export async function POST(request: NextRequest) {
       // Write the USTX file
       await writeFile(ustxPath, JSON.stringify(ustxData, null, 2));
 
-      let renderCommand = `rm -rf /home/codespace/.cache/OpenUtau/* && dotnet run --project OpenUtau.Cli -- ${ustxPath} ${singerId} ${outputJson} ${outputWav} --reset-timings --phoneme-override dream:0:d:jh --render-phrases ${targetPhraseNumbers.join(',')} --trim-leading-silence`;
+      // Avoid --trim-leading-silence for phrases that might have significant leading silence
+      const skipTrimSilence = targetPhraseNumbers.some(p => p >= 4); // Skip for phrase 4 and later
+      let renderCommand = `rm -rf /home/codespace/.cache/OpenUtau/* && dotnet run --project OpenUtau.Cli -- ${ustxPath} ${singerId} ${outputJson} ${outputWav} --reset-timings --phoneme-override dream:0:d:jh --render-phrases ${targetPhraseNumbers.join(',')}`;
+      
+      if (!skipTrimSilence) {
+        renderCommand += ` --trim-leading-silence`;
+      } else {
+        console.log(`[RENDER-SEGMENT] Skipping --trim-leading-silence for phrase(s) ${targetPhraseNumbers.join(',')}`);
+      }
       
       if (qualitySettings?.diffSingerDepth !== undefined) {
         renderCommand += ` --diffsinger-depth ${qualitySettings.diffSingerDepth}`;
@@ -182,6 +272,8 @@ export async function POST(request: NextRequest) {
             .trim();
           
           console.log(`[RENDER-SEGMENT] Filtered stderr: "${filteredStderr}"`);
+          console.log(`[RENDER-SEGMENT] Raw stderr (last 1000 chars): "${stderr.slice(-1000)}"`);
+          console.log(`[RENDER-SEGMENT] Stdout (last 1000 chars): "${stdout.slice(-1000)}"`);
           console.log(`[RENDER-SEGMENT] Command was: ${renderCommand}`);
           
           if (code === 0) {
@@ -189,15 +281,16 @@ export async function POST(request: NextRequest) {
             resolve();
           } else {
             console.log(`[RENDER-SEGMENT] ❌ Failed with code ${code}`);
-            // Only report filtered stderr as the error
+            // Provide more detailed error information
+            const debugInfo = `Exit code: ${code}\nFiltered stderr: ${filteredStderr}\nRaw stderr: ${stderr.slice(-500)}\nStdout: ${stdout.slice(-500)}`;
             const errorMessage = filteredStderr || `Process exited with code ${code}`;
-            reject(new Error(`Phrase rendering failed: ${errorMessage}`));
+            reject(new Error(`Phrase rendering failed: ${errorMessage}\n\nDebug info:\n${debugInfo}`));
           }
         });
         renderProcess.on('error', reject);
       });
 
-      // Step 5: Read rendered audio and cache it
+      // Step 6: Read rendered audio and cache it
       const audioBuffer = await readFile(outputWav);
       
       // Cache the rendered segment for future use
@@ -355,6 +448,11 @@ async function saveSegmentForFullSongIntegration(
       endNoteIndex,
       audioPath: segmentFile,
       lineIndex // Store original lineIndex for reference
+    };
+    
+    // Store metadata
+    updates._metadata = {
+      lastUpdated: Date.now()
     };
     
     console.log(`💾 [SEGMENT-SAVE] Adding update for key: ${updateKey}`);

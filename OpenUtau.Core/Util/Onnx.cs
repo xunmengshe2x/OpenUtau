@@ -29,7 +29,8 @@ namespace OpenUtau.Core {
                 };
             }
             return new List<string> {
-                "CPU"
+                "CPU",
+                "CUDA"
             };
         }
 
@@ -72,6 +73,9 @@ namespace OpenUtau.Core {
                     break;
                 case "CoreML":
                     options.AppendExecutionProvider_CoreML(CoreMLFlags.COREML_FLAG_ENABLE_ON_SUBGRAPH);
+                    break;
+                case "CUDA":
+                    options.AppendExecutionProvider_CUDA(Preferences.Default.OnnxGpu);
                     break;
             }
             return options;

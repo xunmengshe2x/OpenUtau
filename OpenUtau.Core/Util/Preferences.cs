@@ -101,6 +101,17 @@ namespace OpenUtau.Core.Util {
                 } else {
                     Reset();
                 }
+                
+                // Override ONNX settings from environment variables (for Modal GPU support)
+                string envOnnxRunner = Environment.GetEnvironmentVariable("OPENUTAU_ONNX_RUNNER");
+                if (!string.IsNullOrEmpty(envOnnxRunner) && Onnx.getRunnerOptions().Contains(envOnnxRunner)) {
+                    Default.OnnxRunner = envOnnxRunner;
+                }
+                
+                string envOnnxGpu = Environment.GetEnvironmentVariable("OPENUTAU_ONNX_GPU");
+                if (!string.IsNullOrEmpty(envOnnxGpu) && int.TryParse(envOnnxGpu, out int gpuId)) {
+                    Default.OnnxGpu = gpuId;
+                }
             } catch (Exception e) {
                 Log.Error(e, "Failed to load prefs.");
                 Default = new SerializablePreferences();

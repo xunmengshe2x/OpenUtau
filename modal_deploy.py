@@ -16,7 +16,7 @@ from typing import Dict, Any, Optional
 # Modal app configuration
 app = modal.App("openutau-voice-synthesis")
 
-# Docker image with .NET 8.0 + dependencies
+# Docker image with .NET 8.0 + dependencies + CUDA support
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install([
@@ -33,24 +33,27 @@ image = (
         "apt-get update",
         "apt-get install -y dotnet-sdk-8.0"
     ])
-    # Install any other dependencies OpenUtau might need (CPU-only like local)
+    # Install any other dependencies OpenUtau might need
     .run_commands([
         "apt-get install -y libasound2-dev portaudio19-dev libportaudio2",
         "apt-get clean && rm -rf /var/lib/apt/lists/*"
     ])
     # Install FastAPI for web endpoints and PyYAML for USTX files
     .pip_install("fastapi[standard]", "PyYAML")
-    # Set environment variables to disable problematic audio features in headless environment
+    # Set environment variables for GPU-enabled container
     .env({
         "PULSE_RUNTIME_PATH": "/tmp/pulse",
         "ALSA_CARD": "0", 
         "AUDIO_DRIVER": "none",
         "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT": "1",  # Disable globalization to avoid potential issues
         "OPENUTAU_HEADLESS": "1",  # Custom flag to indicate headless mode
-        # Force CPU-only ONNX execution like local environment
-        "OMP_NUM_THREADS": "4",  # Limit CPU threads for stability
-        "MKL_NUM_THREADS": "4",
-        "OPENBLAS_NUM_THREADS": "4"
+        # GPU settings
+        "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
+        "CUDA_VISIBLE_DEVICES": "0",
+        # OpenUtau GPU settings
+        "OPENUTAU_ONNX_RUNNER": "CUDA",
+        "OPENUTAU_ONNX_GPU": "0"
+        # Thread limits removed - set per function as needed
     })
 )
 
@@ -78,6 +81,8 @@ image = image.add_local_dir(
         # Keep G2p zip files - these are required for build!
     ]
 ).run_commands([
+    # Pre-build OpenUtau CLI for faster execution
+    "cd /app/openutau && dotnet build OpenUtau.Cli/OpenUtau.Cli.csproj -c Release -o /app/openutau-build",
     # Install vocoder after source code is available
     "mkdir -p /root/.local/share/OpenUtau/Dependencies",
     "cp /app/openutau/pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.oudep /root/.local/share/OpenUtau/Dependencies/ || echo 'Vocoder file not found'",
@@ -138,9 +143,10 @@ def setup_vocoders_and_voicebanks():
     # First, build the OpenUtau CLI project
     print("🔨 Building OpenUtau CLI project...")
     try:
+        # Skip build since we pre-built in the image
         build_result = subprocess.run([
-            "dotnet", "build", "/app/openutau/OpenUtau.Cli/OpenUtau.Cli.csproj"
-        ], cwd="/app/openutau", capture_output=True, text=True, timeout=120)
+            "ls", "-la", "/app/openutau-build/"
+        ], capture_output=True, text=True, timeout=10)
         
         if build_result.returncode != 0:
             print(f"❌ Failed to build OpenUtau CLI:")
@@ -156,8 +162,7 @@ def setup_vocoders_and_voicebanks():
                 print(f"📦 Installing vocoder: {os.path.basename(vocoder_path)}")
                 try:
                     result = subprocess.run([
-                        "dotnet", "run", "--project", "/app/openutau/OpenUtau.Cli",
-                        "--", "install", vocoder_path
+                        "/app/openutau-build/OpenUtau.Cli", "install", vocoder_path
                     ], cwd="/app/openutau", capture_output=True, text=True, timeout=60)
             
                     if result.returncode == 0:
@@ -323,7 +328,7 @@ def render_segment_OLD_DISABLED(
         try:
             # Use actual path where singer exists in Modal container
             voicebank_path = f"/app/openutau/{singer_id}"
-            cli_command_str = f"mkdir -p /root/.cache/OpenUtau && rm -rf /root/.cache/OpenUtau/* && dotnet run --project OpenUtau.Cli -- {ustx_file} {voicebank_path} {output_json} {output_wav} --reset-timings --phoneme-override dream:0:d:jh"
+            cli_command_str = f"mkdir -p /root/.cache/OpenUtau && /app/openutau-build/OpenUtau.Cli {ustx_file} {voicebank_path} {output_json} {output_wav} --reset-timings --phoneme-override dream:0:d:jh"
             
             # Add quality settings exactly like working API
             if quality_settings:
@@ -423,7 +428,7 @@ def phonemize(ustx_data: Dict[str, Any], singer_id: str) -> Dict[str, Any]:
         try:
             # Use actual path where singer exists in Modal container
             voicebank_path = f"/app/openutau/{singer_id}"
-            cli_command_str = f"mkdir -p /root/.cache/OpenUtau && rm -rf /root/.cache/OpenUtau/* && dotnet run --project OpenUtau.Cli -- {ustx_file} {voicebank_path} {output_json} --reset-timings --preserve-silence-timing"
+            cli_command_str = f"mkdir -p /root/.cache/OpenUtau && /app/openutau-build/OpenUtau.Cli {ustx_file} {voicebank_path} {output_json} --reset-timings --preserve-silence-timing"
             
             print(f"🚀 Executing EXACT phonemize command like working API: {cli_command_str}")
             
@@ -530,13 +535,13 @@ def list_voicebanks() -> Dict[str, Any]:
 @app.function(
     image=image,
     volumes={"/voicebanks": voicebank_volume}, 
-    cpu=4,  # Use CPU-only inference like local environment
+    gpu="T4",  # NVIDIA T4 GPU for DiffSinger inference (cost-effective)
     timeout=600,
     memory=8192
 )
 @modal.fastapi_endpoint(method="POST")
 def render_segment(request_data: Dict[str, Any]) -> Dict[str, Any]:
-    """HTTP endpoint for rendering"""
+    """HTTP endpoint for rendering with GPU (and CPU fallback)"""
     try:
         # Extract parameters
         ustx_data = request_data["ustxData"]
@@ -545,6 +550,55 @@ def render_segment(request_data: Dict[str, Any]) -> Dict[str, Any]:
         end_note_index = request_data.get("endNoteIndex")
         quality_settings = request_data.get("qualitySettings")
         phrase_number = request_data.get("phraseNumbers")
+        use_gpu = request_data.get("useGPU", True)  # Default to GPU
+        
+        # Override ONNX settings based on useGPU parameter
+        if use_gpu:
+            os.environ["OPENUTAU_ONNX_RUNNER"] = "CUDA"
+            os.environ["OPENUTAU_ONNX_GPU"] = "0"
+            # Additional CUDA environment variables for better compatibility
+            os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+            os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+            
+            # Check CUDA availability
+            try:
+                result = subprocess.run(['nvidia-smi'], capture_output=True, text=True, timeout=10)
+                if result.returncode == 0:
+                    print("✅ NVIDIA GPU detected:")
+                    # Show first few lines of nvidia-smi
+                    lines = result.stdout.split('\n')[:5]
+                    for line in lines:
+                        if line.strip():
+                            print(f"   {line}")
+                else:
+                    print("⚠️ nvidia-smi failed - GPU might not be available")
+            except:
+                print("⚠️ Could not run nvidia-smi")
+            
+            # Keep original thread settings for GPU stability
+            os.environ["OMP_NUM_THREADS"] = "4"
+            os.environ["MKL_NUM_THREADS"] = "4"
+            os.environ["OPENBLAS_NUM_THREADS"] = "4"
+            print("⚡ Using GPU (CUDA) for ONNX inference")
+            
+            # Debug: Check ONNX Runtime version and providers
+            try:
+                # This will be executed by the .NET process, but we can check if CUDA libs exist
+                cuda_libs_check = subprocess.run(['find', '/usr', '-name', '*cuda*', '-type', 'f'], 
+                                                capture_output=True, text=True, timeout=5)
+                if cuda_libs_check.stdout:
+                    print("✅ CUDA libraries found on system")
+                else:
+                    print("⚠️ No CUDA libraries found - this might cause GPU inference to fail")
+            except:
+                pass
+        else:
+            os.environ["OPENUTAU_ONNX_RUNNER"] = "CPU"
+            # Use full threading for CPU on T4 container (same hardware as GPU test)
+            os.environ["OMP_NUM_THREADS"] = "8"
+            os.environ["MKL_NUM_THREADS"] = "8"
+            os.environ["OPENBLAS_NUM_THREADS"] = "8"
+            print("🖥️ Using CPU for ONNX inference (full threading)")
         
         print(f"🎤 Starting render: singer={singer_id}, quality={quality_settings}")
         print(f"🎯 DEBUG: Raw phrase_number received: {phrase_number}")
@@ -627,7 +681,7 @@ def render_segment(request_data: Dict[str, Any]) -> Dict[str, Any]:
             
             # Use actual path where singer exists in Modal container
             voicebank_path = f"/app/openutau/{singer_id}" 
-            cli_command_str = f"mkdir -p /root/.cache/OpenUtau && rm -rf /root/.cache/OpenUtau/* && dotnet run --project OpenUtau.Cli -- {ustx_file} {voicebank_path} {output_json} {output_wav} --reset-timings --phoneme-override dream:0:d:jh"
+            cli_command_str = f"mkdir -p /root/.cache/OpenUtau && /app/openutau-build/OpenUtau.Cli {ustx_file} {voicebank_path} {output_json} {output_wav} --reset-timings --phoneme-override dream:0:d:jh"
             
             # Add quality settings exactly like working API
             if quality_settings:
@@ -642,6 +696,11 @@ def render_segment(request_data: Dict[str, Any]) -> Dict[str, Any]:
                 print(f"🎯 DEBUG: Using phrase number: {phrase_number}")
             
             print(f"🚀 Web endpoint executing EXACT command like working API: {cli_command_str}")
+            
+            # Show environment variables for debugging
+            env_vars = ['OPENUTAU_ONNX_RUNNER', 'OPENUTAU_ONNX_GPU', 'CUDA_VISIBLE_DEVICES']
+            for var in env_vars:
+                print(f"🔧 {var}={os.environ.get(var, 'unset')}")
             
             # Execute using bash -c exactly like working Next.js API
             result = subprocess.run([
@@ -671,6 +730,30 @@ def render_segment(request_data: Dict[str, Any]) -> Dict[str, Any]:
             with open(output_wav, 'rb') as f:
                 audio_data = f.read()
             
+            # Check if we got a valid audio file (more than just WAV header)
+            if len(audio_data) <= 46 and use_gpu:
+                print("⚠️ GPU rendering failed (empty audio), retrying with CPU...")
+                
+                # Retry with CPU
+                os.environ["OPENUTAU_ONNX_RUNNER"] = "CPU"
+                print("🖥️ Falling back to CPU for ONNX inference")
+                
+                # Re-run the command with CPU
+                result = subprocess.run([
+                    'bash',
+                    '-c', 
+                    cli_command_str
+                ], cwd="/app/openutau", capture_output=True, text=True, timeout=300)
+                
+                print(f"📊 CPU fallback returncode: {result.returncode}")
+                print(f"📊 CPU fallback stdout: {result.stdout}")
+                print(f"⚠️ CPU fallback stderr: {result.stderr}")
+                
+                if result.returncode == 0 and output_wav.exists():
+                    with open(output_wav, 'rb') as f:
+                        audio_data = f.read()
+                    print(f"✅ CPU fallback generated {len(audio_data)} bytes of audio")
+            
             print(f"✅ Generated {len(audio_data)} bytes of audio")
             
             # Return base64 encoded audio
@@ -680,7 +763,8 @@ def render_segment(request_data: Dict[str, Any]) -> Dict[str, Any]:
             return {
                 "success": True,
                 "audio": audio_b64,
-                "size": len(audio_data)
+                "size": len(audio_data),
+                "used_cpu_fallback": len(audio_data) <= 46 and use_gpu
             }
         
     except Exception as e:
@@ -689,6 +773,291 @@ def render_segment(request_data: Dict[str, Any]) -> Dict[str, Any]:
             "success": False,
             "error": str(e)
         }
+
+
+# High-performance CPU-only endpoint
+@app.function(
+    image=image,
+    volumes={"/voicebanks": voicebank_volume}, 
+    cpu=8,  # 8 cores for high-performance CPU rendering
+    memory=8192,  # 8GB RAM
+    timeout=600
+)
+@modal.fastapi_endpoint(method="POST")
+def render_segment_cpu(request_data: Dict[str, Any]) -> Dict[str, Any]:
+    """HTTP endpoint for high-performance CPU-only rendering"""
+    try:
+        # Extract parameters
+        ustx_data = request_data["ustxData"]
+        singer_id = request_data["singerId"]
+        start_note_index = request_data.get("startNoteIndex")
+        end_note_index = request_data.get("endNoteIndex")
+        quality_settings = request_data.get("qualitySettings")
+        phrase_number = request_data.get("phraseNumbers")
+        
+        # Force CPU mode with high-performance threading
+        os.environ["OPENUTAU_ONNX_RUNNER"] = "CPU"
+        os.environ["OMP_NUM_THREADS"] = "8"  # OpenMP threads
+        os.environ["MKL_NUM_THREADS"] = "8"  # Intel MKL threads
+        os.environ["OPENBLAS_NUM_THREADS"] = "8"  # OpenBLAS threads
+        os.environ["DOTNET_ThreadPool_MaxThreads"] = "16"  # .NET thread pool
+        print("🖥️ Using high-performance CPU (8 cores) for ONNX inference")
+        print(f"🔧 Threading: OMP={os.environ.get('OMP_NUM_THREADS')}, MKL={os.environ.get('MKL_NUM_THREADS')}")
+        
+        # Show CPU info
+        import subprocess
+        try:
+            cpu_info = subprocess.run(['nproc'], capture_output=True, text=True)
+            print(f"🔧 Available CPU cores: {cpu_info.stdout.strip()}")
+        except:
+            pass
+        
+        print(f"🎤 Starting CPU render: singer={singer_id}, quality={quality_settings}")
+        print(f"🎯 DEBUG: Raw phrase_number received: {phrase_number}")
+        print(f"🎯 DEBUG: Type of phrase_number: {type(phrase_number)}")
+        
+        # DEBUG: List available singers to debug the path issue
+        print("🔍 DEBUG: Checking available singers...")
+        singer_paths_to_check = [
+            f"/app/openutau/{singer_id}",
+            f"/voicebanks/{singer_id}",
+            f"/app/openutau/Singers/{singer_id}"
+        ]
+        
+        for path in singer_paths_to_check:
+            if os.path.exists(path):
+                print(f"✅ Found singer at: {path}")
+                # List contents to see what's inside
+                try:
+                    contents = os.listdir(path)
+                    print(f"   Contents: {contents[:10]}")  # Show first 10 items
+                except Exception as e:
+                    print(f"   Could not list contents: {e}")
+            else:
+                print(f"❌ Singer not found at: {path}")
+        
+        # Also check what directories exist in /app/openutau
+        print("🔍 DEBUG: Listing /app/openutau directories...")
+        if os.path.exists("/app/openutau"):
+            try:
+                all_items = os.listdir("/app/openutau")
+                directories = [item for item in all_items if os.path.isdir(os.path.join("/app/openutau", item))]
+                print(f"   Directories: {directories}")
+            except Exception as e:
+                print(f"   Could not list /app/openutau: {e}")
+        
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            
+            # 1. Write USTX data to temporary file as JSON (like working Next.js API)
+            ustx_file = temp_path / "input.ustx" 
+            with open(ustx_file, 'w') as f:
+                json.dump(ustx_data, f, indent=2)
+            
+            # Debug: Show what we wrote to the USTX file
+            print(f"🎯 DEBUG: USTX file written to: {ustx_file}")
+            print(f"🎯 DEBUG: USTX data keys: {list(ustx_data.keys())}")
+            print(f"🎯 DEBUG: Voice parts count: {len(ustx_data.get('voice_parts', []))}")
+            if ustx_data.get('voice_parts'):
+                total_notes = sum(len(part.get('notes', [])) for part in ustx_data['voice_parts'])
+                print(f"🎯 DEBUG: Total notes in USTX: {total_notes}")
+            print(f"🎯 DEBUG: USTX file size: {ustx_file.stat().st_size} bytes")
+            
+            # 2. Prepare output paths
+            output_wav = temp_path / "output.wav"
+            output_json = temp_path / "output.json"
+            
+            # Use actual path where singer exists in Modal container
+            voicebank_path = f"/app/openutau/{singer_id}" 
+            cli_command_str = f"mkdir -p /root/.cache/OpenUtau && /app/openutau-build/OpenUtau.Cli {ustx_file} {voicebank_path} {output_json} {output_wav} --reset-timings --phoneme-override dream:0:d:jh"
+            
+            # Add quality settings exactly like working API
+            if quality_settings:
+                cli_command_str += f" --diffsinger-depth {quality_settings.get('diffSingerDepth', 1000)}"
+                cli_command_str += f" --diffsinger-steps {quality_settings.get('diffSingerSteps', 1000)}"
+                cli_command_str += f" --diffsinger-steps-pitch {quality_settings.get('diffSingerStepsPitch', 5)}" 
+                cli_command_str += f" --diffsinger-steps-variance {quality_settings.get('diffSingerStepsVariance', 4)}"
+            
+            # Add phrase rendering if phrase number is provided
+            if phrase_number:
+                cli_command_str += f" --render-phrases {phrase_number}"
+                print(f"🎯 DEBUG: Using phrase number: {phrase_number}")
+            
+            print(f"🚀 CPU endpoint executing command: {cli_command_str}")
+            
+            # Execute using bash -c exactly like working Next.js API
+            result = subprocess.run([
+                'bash',
+                '-c', 
+                cli_command_str
+            ], cwd="/app/openutau", capture_output=True, text=True, timeout=300)
+            
+            print(f"📊 CLI returncode: {result.returncode}")
+            print(f"📊 CLI stdout: {result.stdout}")
+            print(f"⚠️ CLI stderr: {result.stderr}")
+            
+            # Check if output file exists and its size
+            if output_wav.exists():
+                file_size = output_wav.stat().st_size
+                print(f"📊 Output WAV file size: {file_size} bytes")
+            else:
+                print(f"❌ Output WAV file does not exist at {output_wav}")
+            
+            if result.returncode != 0:
+                raise Exception(f"OpenUtau CLI failed with code {result.returncode}: {result.stderr}")
+            
+            # Read and return the generated audio
+            if not output_wav.exists():
+                raise Exception("OpenUtau CLI did not generate expected WAV output")
+            
+            with open(output_wav, 'rb') as f:
+                audio_data = f.read()
+            
+            print(f"✅ Generated {len(audio_data)} bytes of audio with high-performance CPU")
+            
+            # Return base64 encoded audio
+            import base64
+            audio_b64 = base64.b64encode(audio_data).decode()
+            
+            return {
+                "success": True,
+                "audio": audio_b64,
+                "size": len(audio_data),
+                "used_cpu": True,
+                "cpu_cores": 8
+            }
+        
+    except Exception as e:
+        print(f"❌ CPU Render error: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
+
+# Ultra high-performance CPU-only endpoint (32 cores)
+@app.function(
+    image=image,
+    volumes={"/voicebanks": voicebank_volume}, 
+    cpu=32,  # 32 cores for maximum CPU performance
+    memory=16384,  # 16GB RAM
+    timeout=600
+)
+@modal.fastapi_endpoint(method="POST")
+def render_segment_cpu_32(request_data: Dict[str, Any]) -> Dict[str, Any]:
+    """HTTP endpoint for ultra high-performance 32-core CPU rendering"""
+    try:
+        # Extract parameters
+        ustx_data = request_data["ustxData"]
+        singer_id = request_data["singerId"]
+        start_note_index = request_data.get("startNoteIndex")
+        end_note_index = request_data.get("endNoteIndex")
+        quality_settings = request_data.get("qualitySettings")
+        phrase_number = request_data.get("phraseNumbers")
+        
+        # Force CPU mode with maximum threading
+        os.environ["OPENUTAU_ONNX_RUNNER"] = "CPU"
+        os.environ["OMP_NUM_THREADS"] = "32"  # OpenMP threads
+        os.environ["MKL_NUM_THREADS"] = "32"  # Intel MKL threads
+        os.environ["OPENBLAS_NUM_THREADS"] = "32"  # OpenBLAS threads
+        os.environ["DOTNET_ThreadPool_MaxThreads"] = "64"  # .NET thread pool
+        print("🔥 Using ultra high-performance CPU (32 cores) for ONNX inference")
+        print(f"🔧 Threading: OMP={os.environ.get('OMP_NUM_THREADS')}, MKL={os.environ.get('MKL_NUM_THREADS')}")
+        
+        # Show CPU info
+        import subprocess
+        try:
+            cpu_info = subprocess.run(['nproc'], capture_output=True, text=True)
+            print(f"🔧 Available CPU cores: {cpu_info.stdout.strip()}")
+        except:
+            pass
+        
+        print(f"🎤 Starting 32-core CPU render: singer={singer_id}, quality={quality_settings}")
+        print(f"🎯 DEBUG: Raw phrase_number received: {phrase_number}")
+        print(f"🎯 DEBUG: Type of phrase_number: {type(phrase_number)}")
+        
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            
+            # 1. Write USTX data to temporary file as JSON
+            ustx_file = temp_path / "input.ustx" 
+            with open(ustx_file, 'w') as f:
+                json.dump(ustx_data, f, indent=2)
+            
+            print(f"🎯 DEBUG: USTX file written to: {ustx_file}")
+            print(f"🎯 DEBUG: USTX file size: {ustx_file.stat().st_size} bytes")
+            
+            # 2. Prepare output paths
+            output_wav = temp_path / "output.wav"
+            output_json = temp_path / "output.json"
+            
+            # Use pre-built binary for maximum speed
+            voicebank_path = f"/app/openutau/{singer_id}" 
+            cli_command_str = f"mkdir -p /root/.cache/OpenUtau && /app/openutau-build/OpenUtau.Cli {ustx_file} {voicebank_path} {output_json} {output_wav} --reset-timings --phoneme-override dream:0:d:jh"
+            
+            # Add quality settings
+            if quality_settings:
+                cli_command_str += f" --diffsinger-depth {quality_settings.get('diffSingerDepth', 1000)}"
+                cli_command_str += f" --diffsinger-steps {quality_settings.get('diffSingerSteps', 1000)}"
+                cli_command_str += f" --diffsinger-steps-pitch {quality_settings.get('diffSingerStepsPitch', 5)}" 
+                cli_command_str += f" --diffsinger-steps-variance {quality_settings.get('diffSingerStepsVariance', 4)}"
+            
+            # Add phrase rendering if phrase number is provided
+            if phrase_number:
+                cli_command_str += f" --render-phrases {phrase_number}"
+                print(f"🎯 DEBUG: Using phrase number: {phrase_number}")
+            
+            print(f"🚀 32-core CPU endpoint executing command: {cli_command_str}")
+            
+            # Execute the command
+            result = subprocess.run([
+                'bash',
+                '-c', 
+                cli_command_str
+            ], cwd="/app/openutau", capture_output=True, text=True, timeout=300)
+            
+            print(f"📊 CLI returncode: {result.returncode}")
+            print(f"📊 CLI stdout: {result.stdout}")
+            print(f"⚠️ CLI stderr: {result.stderr}")
+            
+            # Check if output file exists and its size
+            if output_wav.exists():
+                file_size = output_wav.stat().st_size
+                print(f"📊 Output WAV file size: {file_size} bytes")
+            else:
+                print(f"❌ Output WAV file does not exist at {output_wav}")
+            
+            if result.returncode != 0:
+                raise Exception(f"OpenUtau CLI failed with code {result.returncode}: {result.stderr}")
+            
+            # Read and return the generated audio
+            if not output_wav.exists():
+                raise Exception("OpenUtau CLI did not generate expected WAV output")
+            
+            with open(output_wav, 'rb') as f:
+                audio_data = f.read()
+            
+            print(f"✅ Generated {len(audio_data)} bytes of audio with 32-core CPU")
+            
+            # Return base64 encoded audio
+            import base64
+            audio_b64 = base64.b64encode(audio_data).decode()
+            
+            return {
+                "success": True,
+                "audio": audio_b64,
+                "size": len(audio_data),
+                "used_cpu": True,
+                "cpu_cores": 32
+            }
+        
+    except Exception as e:
+        print(f"❌ 32-core CPU Render error: {e}")
+        return {
+            "success": False,
+            "error": str(e)
+        }
+
 
 @app.function(
     image=image,
@@ -733,7 +1102,7 @@ def web_phonemize(request_data: Dict[str, Any]) -> Dict[str, Any]:
             
             # Use actual path where singer exists in Modal container
             voicebank_path = f"/app/openutau/{singer_id}"
-            cli_command_str = f"mkdir -p /root/.cache/OpenUtau && rm -rf /root/.cache/OpenUtau/* && dotnet run --project OpenUtau.Cli -- {ustx_file} {voicebank_path} {output_json} --reset-timings --preserve-silence-timing"
+            cli_command_str = f"mkdir -p /root/.cache/OpenUtau && /app/openutau-build/OpenUtau.Cli {ustx_file} {voicebank_path} {output_json} --reset-timings --preserve-silence-timing"
             
             print(f"🚀 Web phonemize executing EXACT command like working API: {cli_command_str}")
             

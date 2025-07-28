@@ -1367,11 +1367,16 @@ async function applyTimingBasedReplacement(
   console.log(`⏰ METHOD 1: Timing-based replacement for verse ${verseNumber}`);
   console.log(`⏰ Replacing entire time range: ${segmentLength} bytes at position ${startBytePos}`);
   
-  // Simple direct replacement - current working method
-  const actualReplacementLength = Math.min(segmentLength, replacementAudioData.length);
+  // MODIFIED: Preserve trailing sounds beyond verse boundaries (like "pp" in "lap")
+  // OLD BEHAVIOR (can revert if needed): const actualReplacementLength = Math.min(segmentLength, replacementAudioData.length);
+  
+  // NEW BEHAVIOR: Allow replacement audio to extend beyond verse timing if it has trailing sounds
+  const actualReplacementLength = Math.min(replacementAudioData.length, mixedAudioBuffer.length - startBytePos);
   
   // Direct copy without crossfading for speed
   replacementAudioData.copy(mixedAudioBuffer, startBytePos, 0, actualReplacementLength);
+  
+  console.log(`⏰ Replacement used ${actualReplacementLength} bytes (segment boundary was ${segmentLength} bytes)`);
   
   console.log(`⏰ Timing-based replacement complete: ${actualReplacementLength} bytes copied`);
 }
