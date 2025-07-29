@@ -20,40 +20,60 @@ app = modal.App("openutau-voice-synthesis")
 image = (
     modal.Image.debian_slim(python_version="3.11")
     .apt_install([
-        "wget", "curl", "unzip", "build-essential", 
+        "wget", "curl", "unzip", "build-essential",
         "libc6-dev", "libicu-dev", "ca-certificates",
-        # Additional audio system dependencies for OpenUtau
         "alsa-utils", "pulseaudio", "pulseaudio-utils",
         "libasound2-plugins", "libpulse0"
     ])
-    # Install .NET 8.0 SDK
     .run_commands([
+        # --- .NET SDK
         "wget https://packages.microsoft.com/config/debian/12/packages-microsoft-prod.deb -O packages-microsoft-prod.deb",
         "dpkg -i packages-microsoft-prod.deb",
         "apt-get update",
         "apt-get install -y dotnet-sdk-8.0"
     ])
-    # Install any other dependencies OpenUtau might need
+    .run_commands([
+        # --- CUDA 11.8 and core libraries (compatible with ONNX Runtime 1.17.0)
+        "curl -fsSL https://developer.download.nvidia.com/compute/cuda/repos/debian11/x86_64/3bf863cc.pub | gpg --dearmor -o /usr/share/keyrings/nvidia-archive-keyring.gpg",
+        "echo 'deb [arch=amd64 signed-by=/usr/share/keyrings/nvidia-archive-keyring.gpg] https://developer.download.nvidia.com/compute/cuda/repos/debian11/x86_64 /' > /etc/apt/sources.list.d/cuda.list",
+        "apt-get update",
+        "apt-get install -y --no-install-recommends cuda-cudart-11-8 libcublas-11-8 libcublas-dev-11-8 libcurand-11-8 libcusolver-11-8 libcusparse-11-8 libcufft-11-8",
+        "echo '/usr/local/cuda-11.8/targets/x86_64-linux/lib' > /etc/ld.so.conf.d/cuda.conf",
+        "ldconfig",
+        # --- cuDNN for CUDA 11 (compatible with ONNX Runtime 1.17.0)
+        "curl -fsSL https://developer.download.nvidia.com/compute/cudnn/redist/cudnn/linux-x86_64/cudnn-linux-x86_64-8.9.7.29_cuda11-archive.tar.xz -o /tmp/cudnn.tar.xz",
+        "cd /usr/local && tar xf /tmp/cudnn.tar.xz",
+        "cp -P /usr/local/cudnn-linux-x86_64-8.9.7.29_cuda11-archive/lib/* /usr/local/cuda-11.8/targets/x86_64-linux/lib/",
+        "cp /usr/local/cudnn-linux-x86_64-8.9.7.29_cuda11-archive/include/* /usr/local/cuda-11.8/targets/x86_64-linux/include/",
+        "rm -rf /tmp/cudnn.tar.xz /usr/local/cudnn-linux-x86_64-8.9.7.29_cuda11-archive",
+        "ldconfig",
+
+        # --- No symlinks needed - CUDA 11.8 should match ONNX Runtime 1.17.0 expectations
+        "echo 'CUDA 11.8 installation complete - should match ONNX Runtime ABI expectations'",
+
+        "ldconfig",
+        "echo 'All CUDA compatibility symlinks created and ldconfig run'"
+    ])
     .run_commands([
         "apt-get install -y libasound2-dev portaudio19-dev libportaudio2",
         "apt-get clean && rm -rf /var/lib/apt/lists/*"
     ])
-    # Install FastAPI for web endpoints and PyYAML for USTX files
     .pip_install("fastapi[standard]", "PyYAML")
-    # Set environment variables for GPU-enabled container
     .env({
         "PULSE_RUNTIME_PATH": "/tmp/pulse",
-        "ALSA_CARD": "0", 
+        "ALSA_CARD": "0",
         "AUDIO_DRIVER": "none",
-        "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT": "1",  # Disable globalization to avoid potential issues
-        "OPENUTAU_HEADLESS": "1",  # Custom flag to indicate headless mode
-        # GPU settings
+        "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT": "1",
+        "OPENUTAU_HEADLESS": "1",
         "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
         "CUDA_VISIBLE_DEVICES": "0",
-        # OpenUtau GPU settings
         "OPENUTAU_ONNX_RUNNER": "CUDA",
-        "OPENUTAU_ONNX_GPU": "0"
-        # Thread limits removed - set per function as needed
+        "OPENUTAU_ONNX_GPU": "0",
+        "LD_LIBRARY_PATH": "/usr/local/cuda-11.8/targets/x86_64-linux/lib:/usr/local/cuda-11.8/lib64:/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu",
+        "ORT_LOG_LEVEL": "VERBOSE",
+        "ORT_CUDA_VERBOSE": "1",
+        "OPENUTAU_DEBUG_ONNX": "1",
+        "OPENUTAU_VERBOSE_LOGS": "1"
     })
 )
 
@@ -81,8 +101,42 @@ image = image.add_local_dir(
         # Keep G2p zip files - these are required for build!
     ]
 ).run_commands([
-    # Pre-build OpenUtau CLI for faster execution
-    "cd /app/openutau && dotnet build OpenUtau.Cli/OpenUtau.Cli.csproj -c Release -o /app/openutau-build",
+    # Force complete rebuild with GPU ONNX Runtime for CUDA 12 - clear all caches
+    "cd /app/openutau && rm -rf bin/ obj/ */bin/ */obj/",
+    "cd /app/openutau && dotnet nuget locals all --clear",
+    "cd /app/openutau && dotnet restore --force --no-cache",
+    "cd /app/openutau && dotnet clean",
+    "cd /app/openutau && dotnet build OpenUtau.Cli/OpenUtau.Cli.csproj -c Release -o /app/openutau-build --force --no-incremental",
+    # Comprehensive verification of CUDA provider libraries
+    "echo '=== ONNX Runtime Files Check ==='",
+    "find /app/openutau-build -name '*onnxruntime*' -type f | sort || echo 'No ONNX Runtime files found'",
+    "echo '=== CUDA Provider Files Check ==='", 
+    "find /app/openutau-build -name '*cuda*' -type f | sort || echo 'No CUDA files found'",
+    "echo '=== ONNX Runtime CUDA Provider Dependencies Check ==='",
+    "ldd /app/openutau-build/runtimes/linux-x64/native/libonnxruntime_providers_cuda.so 2>/dev/null | grep -E '(cufft|cublas|cudart)' || echo 'Could not check CUDA dependencies'",
+    "strings /app/openutau-build/runtimes/linux-x64/native/libonnxruntime_providers_cuda.so 2>/dev/null | grep 'libcufft.so' || echo 'Could not check required CUDA FFT version'",
+    "echo '=== Critical cuDNN Version Check ==='",
+    "strings /app/openutau-build/runtimes/linux-x64/native/libonnxruntime_providers_cuda.so 2>/dev/null | grep -E 'libcudnn\\.so\\.[0-9]+' | head -5 || echo 'Could not determine cuDNN version requirement'",
+    "echo '=== Linux Native Runtime Directory ==='",
+    "ls -la /app/openutau-build/runtimes/linux-x64/native/ 2>/dev/null || echo 'No linux-x64 native directory'",
+    "echo '=== Checking for Critical CUDA Provider Libraries ==='",
+    "ls -la /app/openutau-build/runtimes/linux-x64/native/*cuda* 2>/dev/null || echo 'No CUDA provider libraries in native directory'",
+    "ls -la /app/openutau-build/runtimes/linux-x64/native/*onnxruntime_providers_cuda* 2>/dev/null && echo '✅ CUDA provider found!' || echo 'CRITICAL: CUDA provider NOT FOUND'",
+    # Ensure the CUDA provider can be found at runtime by creating symlinks if needed
+    "cd /app/openutau-build/runtimes/linux-x64/native/ && ls -la *cuda* && echo 'CUDA provider verified!'",
+    # Verify CUDA libraries are properly installed
+    "echo '=== CUDA Libraries Verification ==='",
+    "ls -la /usr/local/cuda-12.6/targets/x86_64-linux/lib/libcublas* 2>/dev/null || echo 'cuBLAS libraries not found'",
+    "ls -la /usr/local/cuda-12.6/targets/x86_64-linux/lib/libcublasLt* 2>/dev/null || echo 'cuBLASLt libraries not found'",
+    "echo '=== ONNX Runtime Compatibility Check ==='",
+    "ls -la /usr/local/cuda-12.6/targets/x86_64-linux/lib/libcublasLt.so.11 2>/dev/null && echo '✅ libcublasLt.so.11 symlink found!' || echo '❌ libcublasLt.so.11 symlink missing'",
+    "ls -la /usr/local/cuda-12.6/targets/x86_64-linux/lib/libcublas.so.11 2>/dev/null && echo '✅ libcublas.so.11 symlink found!' || echo '❌ libcublas.so.11 symlink missing'",
+    "ls -la /usr/local/cuda-12.6/targets/x86_64-linux/lib/libcufft.so.10 2>/dev/null && echo '✅ libcufft.so.10 symlink found!' || echo '❌ libcufft.so.10 symlink missing'",
+    "ls -la /usr/local/cuda-12.6/targets/x86_64-linux/lib/libcufft.so.11 2>/dev/null && echo '✅ libcufft.so.11 source found!' || echo '❌ libcufft.so.11 source missing'",
+    "echo '=== cuDNN Library Check ==='",
+    "ls -la /usr/local/cuda-12.6/targets/x86_64-linux/lib/libcudnn.so.8 2>/dev/null && echo '✅ libcudnn.so.8 found!' || echo '❌ libcudnn.so.8 missing'",
+    "ls -la /usr/local/cuda-12.6/targets/x86_64-linux/lib/libcudnn* 2>/dev/null || echo 'No cuDNN libraries found'",
+    "ldconfig -p | grep -E '(libcudnn|cudnn)' || echo 'No cuDNN libraries found in ldconfig'",
     # Install vocoder after source code is available
     "mkdir -p /root/.local/share/OpenUtau/Dependencies",
     "cp /app/openutau/pc_nsf_hifigan_44.1k_hop512_128bin_2025.02.oudep /root/.local/share/OpenUtau/Dependencies/ || echo 'Vocoder file not found'",
@@ -581,17 +635,41 @@ def render_segment(request_data: Dict[str, Any]) -> Dict[str, Any]:
             os.environ["OPENBLAS_NUM_THREADS"] = "4"
             print("⚡ Using GPU (CUDA) for ONNX inference")
             
-            # Debug: Check ONNX Runtime version and providers
+            # Enhanced ONNX Runtime debugging
             try:
-                # This will be executed by the .NET process, but we can check if CUDA libs exist
-                cuda_libs_check = subprocess.run(['find', '/usr', '-name', '*cuda*', '-type', 'f'], 
+                # Check if CUDA libraries are properly accessible
+                cuda_libs_check = subprocess.run(['find', '/usr/local/cuda*', '-name', 'libcudart*', '-type', 'f'], 
                                                 capture_output=True, text=True, timeout=5)
                 if cuda_libs_check.stdout:
-                    print("✅ CUDA libraries found on system")
+                    print("✅ CUDA runtime libraries found:")
+                    for lib in cuda_libs_check.stdout.strip().split('\n')[:3]:
+                        print(f"   {lib}")
                 else:
-                    print("⚠️ No CUDA libraries found - this might cause GPU inference to fail")
-            except:
-                pass
+                    print("⚠️ No CUDA runtime libraries found")
+                
+                # Check ONNX Runtime CUDA provider
+                onnx_cuda_check = subprocess.run(['find', '/app/openutau-build', '-name', '*onnxruntime_providers_cuda*', '-type', 'f'], 
+                                                capture_output=True, text=True, timeout=5)
+                if onnx_cuda_check.stdout:
+                    print("✅ ONNX CUDA provider found:")
+                    for lib in onnx_cuda_check.stdout.strip().split('\n'):
+                        print(f"   {lib}")
+                        # Check dependencies
+                        try:
+                            ldd_result = subprocess.run(['ldd', lib], capture_output=True, text=True, timeout=3)
+                            if ldd_result.returncode == 0:
+                                missing = [line for line in ldd_result.stdout.split('\n') if 'not found' in line]
+                                if missing:
+                                    print(f"   ⚠️ Missing dependencies: {missing}")
+                                else:
+                                    print(f"   ✅ All dependencies satisfied")
+                        except:
+                            pass
+                else:
+                    print("❌ ONNX CUDA provider NOT FOUND - GPU will fail")
+                    
+            except Exception as e:
+                print(f"⚠️ Could not check CUDA setup: {e}")
         else:
             os.environ["OPENUTAU_ONNX_RUNNER"] = "CPU"
             # Use full threading for CPU on T4 container (same hardware as GPU test)
@@ -698,7 +776,7 @@ def render_segment(request_data: Dict[str, Any]) -> Dict[str, Any]:
             print(f"🚀 Web endpoint executing EXACT command like working API: {cli_command_str}")
             
             # Show environment variables for debugging
-            env_vars = ['OPENUTAU_ONNX_RUNNER', 'OPENUTAU_ONNX_GPU', 'CUDA_VISIBLE_DEVICES']
+            env_vars = ['OPENUTAU_ONNX_RUNNER', 'OPENUTAU_ONNX_GPU', 'CUDA_VISIBLE_DEVICES', 'ORT_LOG_LEVEL', 'OPENUTAU_DEBUG_ONNX']
             for var in env_vars:
                 print(f"🔧 {var}={os.environ.get(var, 'unset')}")
             
@@ -709,9 +787,20 @@ def render_segment(request_data: Dict[str, Any]) -> Dict[str, Any]:
                 cli_command_str
             ], cwd="/app/openutau", capture_output=True, text=True, timeout=300)
             
-            print(f"📊 CLI returncode: {result.returncode}")
-            print(f"📊 CLI stdout: {result.stdout}")
-            print(f"⚠️ CLI stderr: {result.stderr}")
+            print(f"📊 GPU Render CLI returncode: {result.returncode}")
+            print(f"📊 GPU CLI stdout length: {len(result.stdout)} chars")
+            if result.stdout:
+                print("📊 GPU CLI stdout (showing ALL lines for debugging):")
+                for i, line in enumerate(result.stdout.split('\n')):
+                    if line.strip():
+                        print(f"   {i+1:2d}: {line}")
+            
+            print(f"⚠️ GPU CLI stderr length: {len(result.stderr)} chars")
+            if result.stderr:
+                print("⚠️ GPU CLI stderr (showing ALL lines for debugging):")
+                for i, line in enumerate(result.stderr.split('\n')):
+                    if line.strip():
+                        print(f"   {i+1:2d}: {line}")
             
             # Check if output file exists and its size
             if output_wav.exists():
