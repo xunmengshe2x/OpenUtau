@@ -7,8 +7,9 @@ import { join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { segmentCache } from '@/utils/segmentCache';
 
-// Modal configuration - Use 8-core CPU endpoint (fastest and cheapest)
-const MODAL_RENDER_URL = 'https://wwatashi84--openutau-voice-synthesis-render-segment-cpu.modal.run';
+// Modal configuration - Dynamic endpoint selection based on useGPU
+const MODAL_CPU_URL = 'https://wwatashi84--openutau-voice-synthesis-render-segment-cpu.modal.run';
+const MODAL_GPU_URL = 'https://wwatashi84--openutau-voice-synthesis-render-segment.modal.run';
 const USE_MODAL = true; // Set to false to use local CLI
 
 interface SegmentRenderRequest {
@@ -17,6 +18,7 @@ interface SegmentRenderRequest {
   startNoteIndex: number;
   endNoteIndex: number;
   lineIndex?: number;
+  useGPU?: boolean; // GPU toggle for faster rendering
   qualitySettings?: {
     diffSingerDepth: number;
     diffSingerSteps: number;
@@ -28,7 +30,7 @@ interface SegmentRenderRequest {
 export async function POST(request: NextRequest) {
   try {
     const requestBody = await request.json();
-    const { ustxData, singerId, startNoteIndex, endNoteIndex, lineIndex, qualitySettings }: SegmentRenderRequest = requestBody;
+    const { ustxData, singerId, startNoteIndex, endNoteIndex, lineIndex, useGPU = false, qualitySettings }: SegmentRenderRequest = requestBody;
 
     if (!ustxData || !singerId || startNoteIndex == null || endNoteIndex == null) {
       return NextResponse.json({ error: 'Missing required parameters' }, { status: 400 });
@@ -142,31 +144,70 @@ export async function POST(request: NextRequest) {
     // Step 4: Try Modal first, fallback to local CLI if needed
     if (USE_MODAL) {
       try {
-        console.log('🚀 Using Modal 8-core CPU for segment rendering...');
+        // Select endpoint based on GPU preference
+        const modalUrl = useGPU ? MODAL_GPU_URL : MODAL_CPU_URL;
+        const endpointType = useGPU ? 'GPU (with CPU fallback)' : '8-core CPU';
+        
+        console.log(`🚀 Using Modal ${endpointType} for segment rendering...`);
         console.log(`🎯 DEBUG: Sending to Modal - phraseNumbers=${JSON.stringify(targetPhraseNumbers)}`);
         
-        const modalResponse = await fetch(MODAL_RENDER_URL, {
+        // Create payload and log it for debugging
+        const requestPayload = useGPU ? {
+          // GPU endpoint format - EXACT MATCH to working test script
+          ustxData,
+          singerId,
+          phraseNumbers: targetPhraseNumbers[0] || 1,
+          useGPU: true,
+          qualitySettings: qualitySettings || {
+            diffSingerDepth: 1000,
+            diffSingerSteps: 1000,
+            diffSingerStepsPitch: 5,
+            diffSingerStepsVariance: 4
+          }
+        } : {
+          // CPU endpoint format (simpler, just phraseNumbers)
+          ustxData,
+          singerId,
+          phraseNumbers: targetPhraseNumbers[0] || 1,
+          qualitySettings: qualitySettings || {
+            diffSingerDepth: 1000,
+            diffSingerSteps: 1000,
+            diffSingerStepsPitch: 5,
+            diffSingerStepsVariance: 4
+          }
+        };
+        
+        console.log(`🎯 DEBUG: useGPU=${useGPU}, modalUrl=${modalUrl}`);
+        console.log(`🎯 DEBUG: targetPhraseNumbers array:`, targetPhraseNumbers);
+        console.log(`🎯 DEBUG: targetPhraseNumbers[0]:`, targetPhraseNumbers[0]);
+        console.log(`🎯 DEBUG: Request payload keys: ${Object.keys(requestPayload).join(', ')}`);
+        console.log(`🎯 DEBUG: phraseNumbers value: ${requestPayload.phraseNumbers} (type: ${typeof requestPayload.phraseNumbers})`);
+        console.log(`🎯 DEBUG: qualitySettings:`, JSON.stringify(requestPayload.qualitySettings));
+        if (useGPU) {
+          console.log(`🎯 DEBUG: GPU payload - minimal format like test script`);
+        } else {
+          console.log(`🎯 DEBUG: CPU payload format`);
+        }
+        
+        const modalResponse = await fetch(modalUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({
-            ustxData,
-            singerId,
-            phraseNumbers: targetPhraseNumbers[0] || 1, // 8-core CPU endpoint expects single phrase number
-            qualitySettings: qualitySettings || {
-              diffSingerDepth: 1000,
-              diffSingerSteps: 1000,
-              diffSingerStepsPitch: 5,
-              diffSingerStepsVariance: 4
-            }
-          }),
+          body: JSON.stringify(requestPayload),
         });
 
         const modalResult = await modalResponse.json();
         
+        console.log(`🎯 DEBUG: Modal response keys: ${Object.keys(modalResult).join(', ')}`);
+        console.log(`🎯 DEBUG: Modal success: ${modalResult.success}`);
+        console.log(`🎯 DEBUG: Modal used_cpu_fallback: ${modalResult.used_cpu_fallback}`);
+        console.log(`🎯 DEBUG: Modal cpu_cores: ${modalResult.cpu_cores}`);
+        console.log(`🎯 DEBUG: Modal audio size: ${modalResult.size}`);
+        
         if (modalResult.success && modalResult.audio) {
-          console.log(`✅ Modal 8-core CPU segment rendering successful!`);
+          const fallbackMsg = modalResult.used_cpu_fallback ? ' (⚠️ used CPU fallback)' : '';
+          console.log(`✅ Modal ${endpointType} segment rendering successful!${fallbackMsg}`);
           
           // Decode base64 audio
           const audioBuffer = Buffer.from(modalResult.audio, 'base64');
@@ -192,23 +233,24 @@ export async function POST(request: NextRequest) {
               'Content-Length': audioBuffer.length.toString(),
               'Cache-Control': 'public, max-age=86400',
               'X-Segment-Info': JSON.stringify({
-                method: 'modal-8core-cpu-render',
+                method: useGPU ? 'modal-gpu-render' : 'modal-8core-cpu-render',
                 phrasesRendered: targetPhraseNumbers,
                 totalPhrases: phrasesData.phrases.length,
                 lineIndex,
                 targetNotes: `${startNoteIndex}-${endNoteIndex}`,
                 cached: false,
                 modalRendered: true,
-                endpoint: '8-core-cpu'
+                endpoint: useGPU ? 'gpu-with-fallback' : '8-core-cpu',
+                usedCpuFallback: modalResult.used_cpu_fallback || false
               })
             },
           });
         } else {
-          console.warn('⚠️ Modal 8-core CPU rendering failed, falling back to local CLI:', modalResult.error);
+          console.warn(`⚠️ Modal ${endpointType} rendering failed, falling back to local CLI:`, modalResult.error);
           // Fall through to local CLI
         }
       } catch (error) {
-        console.warn('⚠️ Modal 8-core CPU request failed, falling back to local CLI:', error);
+        console.warn(`⚠️ Modal ${endpointType} request failed, falling back to local CLI:`, error);
         // Fall through to local CLI  
       }
     }

@@ -1,4 +1,5 @@
 import { NextRequest } from 'next/server';
+import { CacheInvalidationManager } from '@/utils/cacheInvalidation';
 
 // Check if the request is a simple correction vs full transformation
 function isSimpleCorrectionRequest(theme: string, currentLyrics: string): boolean {
@@ -331,10 +332,13 @@ async function executeChangeMultipleVerses(args: {
     };
   }
   
-  const results: any[] = [];
-  const apiKey = process.env.OPENROUTER_API_KEY || "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";
+  const apiKey = process.env.OPENROUTER_API_KEY || "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";
   
-  // Process each verse in the range
+  // Process verses SEQUENTIALLY for autoregressive context awareness
+  const results: any[] = [];
+  const changedVerses: string[] = []; // Track changed verses for context building
+  const usedWords = new Set<string>(); // Track words to avoid repetition
+  
   for (let verseNum = start_verse; verseNum <= end_verse; verseNum++) {
     console.log(`[DEBUG] Looking for verse ${verseNum} in verses:`, lyricsMetadata.verses.map(v => ({ number: v.number, lyrics: v.lyrics?.slice(0, 50) + '...' })));
     const verse = lyricsMetadata.verses.find((v: any) => v.number === verseNum);
@@ -344,18 +348,36 @@ async function executeChangeMultipleVerses(args: {
     }
     console.log(`[DEBUG] Found verse ${verseNum}:`, { number: verse.number, lyrics: verse.lyrics });
     
-    // Adjust theme based on progression style
+    // Build contextual theme with awareness of previously changed verses
     let verseTheme = new_theme;
     if (progression_style === 'evolving') {
       const progressWords = ['beginning', 'developing', 'climax', 'resolution'];
       const progressIndex = Math.min(verseNum - start_verse, progressWords.length - 1);
       verseTheme = `${new_theme} (${progressWords[progressIndex]} of story)`;
+      
+      // Add context from previous verses
+      if (changedVerses.length > 0) {
+        verseTheme += `\n\nPrevious verses in this sequence:\n${changedVerses.join('\n')}`;
+      }
     } else if (progression_style === 'continuous') {
-      verseTheme = `${new_theme} (continuing from previous verse)`;
+      verseTheme = `${new_theme}`;
+      
+      // Add context from previous verses for continuity
+      if (changedVerses.length > 0) {
+        const contextLimit = Math.min(changedVerses.length, 2); // Use last 2 verses as context
+        const recentVerses = changedVerses.slice(-contextLimit);
+        const avoidWordsList = Array.from(usedWords).slice(0, 15); // Limit to recent words
+        const avoidWordsText = avoidWordsList.length > 0 
+          ? `\n\nIMPORTANT - AVOID THESE WORDS (already used): ${avoidWordsList.join(', ')}`
+          : '';
+        verseTheme += `\n\nContinuing from these previous verses:\n${recentVerses.join('\n')}\n\nMaintain narrative flow and avoid repetition.${avoidWordsText}`;
+      } else {
+        verseTheme += ` (first verse in sequence)`;
+      }
     }
     
     try {
-      console.log(`[DEBUG] Processing verse ${verseNum} with theme: ${verseTheme}`);
+      console.log(`[DEBUG] Processing verse ${verseNum} with contextual theme: ${verseTheme} (SEQUENTIAL)`);
       const result = await executeChangeLyrics({
         verse_number: verseNum,
         new_theme: verseTheme,
@@ -363,16 +385,26 @@ async function executeChangeMultipleVerses(args: {
       }, lyricsMetadata, chatHistory);
       
       console.log(`[DEBUG] Verse ${verseNum} result:`, result);
+      
       if (result.success) {
         results.push(result);
-        console.log(`[DEBUG] Added verse ${verseNum} to results, total: ${results.length}`);
+        // Add this verse to context for next verses
+        changedVerses.push(`Verse ${verseNum}: ${result.new_lyrics}`);
+        
+        // Track words used in this verse to avoid repetition
+        if (result.new_lyrics) {
+          const verseWords = result.new_lyrics.toLowerCase().match(/\b\w{4,}\b/g) || [];
+          verseWords.forEach((word: string) => usedWords.add(word));
+        }
       } else {
-        console.log(`[DEBUG] Verse ${verseNum} failed:`, result);
+        console.error(`[ERROR] Failed to change verse ${verseNum}:`, result.error);
       }
     } catch (error) {
       console.error(`[ERROR] Failed to process verse ${verseNum}:`, error);
     }
   }
+  
+  console.log(`[DEBUG] Sequential processing completed: ${results.length} verses successfully changed`);
   
   // Check if this is part of a larger operation that needs batching
   const totalVerses = lyricsMetadata.totalVerses || lyricsMetadata.verses.length;
@@ -455,7 +487,7 @@ async function executeEditWord(args: {
   if (!syllable_matched) {
     console.log(`Syllable mismatch: "${old_word}" (${oldWordSyllables} syl) → "${new_word}" (${newWordSyllables} syl). Using AI to find better match.`);
     
-    const apiKey = process.env.OPENROUTER_API_KEY || "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";
+    const apiKey = process.env.OPENROUTER_API_KEY || "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";
     
     const prompt = `Find a ${oldWordSyllables}-syllable word or phrase that means "${new_word}" to replace "${old_word}" in this context:
 "${current_lyrics}"
@@ -536,7 +568,7 @@ async function executeChangeLyrics(args: {
   console.log('Processing lyrics for transformation:', current_lyrics);
   
   let new_lyrics;
-  const apiKey = process.env.OPENROUTER_API_KEY || "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";
+  const apiKey = process.env.OPENROUTER_API_KEY || "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";
   
   // Check if this is a simple correction vs full transformation
   const isSimpleCorrection = isSimpleCorrectionRequest(new_theme, current_lyrics);
@@ -560,6 +592,23 @@ async function executeChangeLyrics(args: {
       return `${countSyllables(cleanWord)} syllables`;
     }).join(', ');
     
+    // Extract previously used words from chat history to avoid repetition
+    const previouslyUsedWords = new Set<string>();
+    if (chatHistory && chatHistory.length > 0) {
+      chatHistory.forEach(msg => {
+        if (msg.content && typeof msg.content === 'string') {
+          // Extract words from previous messages, excluding common words
+          const words = msg.content.toLowerCase().match(/\b\w{4,}\b/g) || [];
+          words.forEach((word: string) => previouslyUsedWords.add(word));
+        }
+      });
+    }
+    
+    const avoidWords = Array.from(previouslyUsedWords).slice(0, 20); // Limit to avoid overly long prompts
+    const repetitionWarning = avoidWords.length > 0 
+      ? `\n\nVOCABULARY DIVERSITY (CRITICAL):\n- NEVER reuse these words from previous verses: ${avoidWords.join(', ')}\n- Use fresh, creative synonyms and alternative expressions\n- Each verse must have unique vocabulary while maintaining the ${new_theme} theme`
+      : '';
+
     const prompt = `Transform these lyrics to be about "${new_theme}" by replacing ONLY the existing words with the EXACT same structure:
 
 Original: "${current_lyrics}"
@@ -580,7 +629,7 @@ COHERENCE & GRAMMAR (EQUALLY IMPORTANT):
 7. Each phrase must form complete, meaningful thoughts
 8. Avoid broken sentence structures or meaningless word combinations
 9. Ensure proper verb-noun relationships and sentence flow
-10. The lyrics should tell a coherent story about ${new_theme}
+10. The lyrics should tell a coherent story about ${new_theme}${repetitionWarning}
 
 EXAMPLE OF GOOD vs BAD transformations:
 ❌ BAD: "Surfing to ride one wave Basking to tan one more" (broken grammar, makes no sense)
@@ -783,7 +832,7 @@ Would you like me to help you edit the lyrics to achieve the emotional effect yo
       return new Response('Message is required', { status: 400 });
     }
 
-    const apiKey = process.env.OPENROUTER_API_KEY || "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";
+    const apiKey = process.env.OPENROUTER_API_KEY || "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";
     
     // Create system message with current lyrics information
     let systemContent = 'You are an AI assistant for OpenUtau Piano Roll, a music editing software. CRITICAL: You MUST ALWAYS choose exactly ONE tool for EVERY response.\n\n**PITCH MODIFICATIONS - HIGHEST PRIORITY:**\nWhen users mention PITCH, TONE, HIGHER, LOWER, TRANSPOSE, SEMITONES, OCTAVES, VIBRATO, or similar musical terms, this is a PITCH MODIFICATION request, NOT a lyrics change request. Examples:\n- "make the first verse higher pitch" → This is PITCH modification, NOT lyrics editing\n- "verse 1 should have lower pitch" → This is PITCH modification, NOT lyrics editing  \n- "make it sound higher" → This is PITCH modification, NOT lyrics editing\n- "transpose verse 2 down" → This is PITCH modification, NOT lyrics editing\n\nPITCH REQUESTS ARE HANDLED AUTOMATICALLY - do not use any lyrics editing tools for these requests.\n\nTool Selection Guide:\n\n**Use edit_word_in_verse for single verse word replacements:**\n- "change cosmos to universe in verse 1" → edit_word_in_verse(verse_number: 1, old_word: "cosmos", new_word: "universe")\n- "replace starlight with cosmos" → edit_word_in_verse(verse_number: 1, old_word: "starlight", new_word: "cosmos")\n\n**Use edit_word_in_multiple_verses for global word replacements:**\n- "change stas to rocks everywhere" → edit_word_in_multiple_verses(old_word: "stas", new_word: "rocks", scope: "everywhere")\n- "replace word X with Y in all verses" → edit_word_in_multiple_verses(old_word: "X", new_word: "Y", scope: "all_verses")\n\n**Use change_verse_lyrics for single verse theme changes:**\n- "make verse 1 about mars" → change_verse_lyrics(verse_number: 1, new_theme: "mars")\n- "change the first verse to winter theme" → change_verse_lyrics(verse_number: 1, new_theme: "winter")\n\n**Use change_multiple_verses for multi-verse theme changes (6 verses MAX per call):**\n- "change the first three verses to be about stars" → change_multiple_verses(start_verse: 1, end_verse: 3, new_theme: "stars")\n- "continue this theme into verses 2 and 3" → change_multiple_verses(start_verse: 2, end_verse: 3, new_theme: "[current theme]", progression_style: "continuous")\n- "make verses 1-4 about ocean with evolving story" → change_multiple_verses(start_verse: 1, end_verse: 4, new_theme: "ocean", progression_style: "evolving")\n\n**For WHOLE SONG or 7+ verse requests, use BATCHING:**\n- "make this song about X" → change_multiple_verses(start_verse: 1, end_verse: 6, new_theme: "X"), then respond_with_text with batch_operation metadata\n- "change entire song to Y theme" → change_multiple_verses(start_verse: 1, end_verse: 6, new_theme: "Y"), then respond_with_text with batch_operation metadata\n- "transform all verses to Z" → change_multiple_verses(start_verse: 1, end_verse: 6, new_theme: "Z"), then respond_with_text with batch_operation metadata\n\n**Use respond_with_text for non-lyrics conversations:**\n- "how does this work?" → respond_with_text(response: "explanation...")\n- "what can you do?" → respond_with_text(response: "I can help you...")\n- general questions → respond_with_text(response: "answer...")\n\n';
@@ -798,7 +847,7 @@ Would you like me to help you edit the lyrics to achieve the emotional effect yo
         if (lyricsMetadata.cachedVerseDetection && lyricsMetadata.cachedVerseDetection.length > 0) {
           console.log('CHAT SYSTEM: Using cached verse detection (prevent re-detection corruption)');
           const verses = lyricsMetadata.cachedVerseDetection;
-          console.log('CHAT SYSTEM: Cached verses:', verses.map(v => `${v.verseNumber}: "${v.lyrics}"`));
+          console.log('CHAT SYSTEM: Cached verses:', verses.map((v: any) => `${v.verseNumber}: "${v.lyrics}"`));
           
           const { USTXLyricsManager } = await import('@/utils/ustxLyricsUtils');
           const lyricsManager = new USTXLyricsManager(lyricsMetadata.ustxData);
@@ -826,7 +875,7 @@ Would you like me to help you edit the lyrics to achieve the emotional effect yo
           
           const verses = lyricsManager.detectVersesSimple();
           console.log('CHAT SYSTEM: Fallback detection verses:', verses.length);
-          console.log('CHAT SYSTEM: Verses:', verses.map(v => `${v.verseNumber}: "${v.lyrics}"`));
+          console.log('CHAT SYSTEM: Verses:', verses.map((v: any) => `${v.verseNumber}: "${v.lyrics}"`));
           
           const allLyrics = lyricsManager.getAllLyrics();
           processedMetadata = {
@@ -1166,6 +1215,23 @@ Would you like me to help you edit the lyrics to achieve the emotional effect yo
                           const result = await executeChangeLyrics(args, processedMetadata || lyricsMetadata, messages);
                           console.log('Tool result:', result);
                           
+                          // Invalidate cache for changed lyrics
+                          if (result.success && result.changed && (processedMetadata || lyricsMetadata)) {
+                            try {
+                              await CacheInvalidationManager.invalidateChangedSegments(
+                                (processedMetadata || lyricsMetadata).ustxData,
+                                (processedMetadata || lyricsMetadata).ustxData, // Same data for now
+                                [{
+                                  verseNumber: result.verse_number,
+                                  oldLyrics: result.original_lyrics || '',
+                                  newLyrics: result.new_lyrics || ''
+                                }]
+                              );
+                            } catch (cacheError) {
+                              console.error('Cache invalidation failed:', cacheError);
+                            }
+                          }
+                          
                           // Send tool execution result
                           controller.enqueue(encoder.encode(`data: ${JSON.stringify({ 
                             tool_result: {
@@ -1289,6 +1355,27 @@ Would you like me to help you edit the lyrics to achieve the emotional effect yo
                           
                           const result = await executeChangeMultipleVerses(args, processedMetadata || lyricsMetadata, messages);
                           console.log('Multi-verse change result:', result);
+                          
+                          // Invalidate cache for changed lyrics in multi-verse operation
+                          if (result.success && result.results?.length > 0 && (processedMetadata || lyricsMetadata)) {
+                            try {
+                              const changedVerses = result.results.filter((r: any) => r.changed).map((r: any) => ({
+                                verseNumber: r.verse_number,
+                                oldLyrics: r.original_lyrics || '',
+                                newLyrics: r.new_lyrics || ''
+                              }));
+                              
+                              if (changedVerses.length > 0) {
+                                await CacheInvalidationManager.invalidateChangedSegments(
+                                  (processedMetadata || lyricsMetadata).ustxData,
+                                  (processedMetadata || lyricsMetadata).ustxData, // Same data for now
+                                  changedVerses
+                                );
+                              }
+                            } catch (cacheError) {
+                              console.error('Multi-verse cache invalidation failed:', cacheError);
+                            }
+                          }
                           
                           // Send tool execution result (check if controller is still open)
                           try {

@@ -23,8 +23,8 @@ export async function POST(request: NextRequest) {
       // Write USTX data to temporary file
       await writeFile(ustxPath, JSON.stringify(ustxData, null, 2));
 
-      // Build CLI command with quality settings
-      let cliCommand = `rm -rf /home/codespace/.cache/OpenUtau/* && dotnet run --project OpenUtau.Cli -- ${ustxPath} ${singerId} ${outputJson} ${outputWav} --reset-timings --preserve-silence-timing`;
+      // Build CLI command with quality settings and phoneme overrides
+      let cliCommand = `rm -rf /home/codespace/.cache/OpenUtau/* && dotnet run --project OpenUtau.Cli -- ${ustxPath} ${singerId} ${outputJson} ${outputWav} --reset-timings --phoneme-override dream:0:d:jh`;
       
       // Add DiffSinger quality parameters if provided
       if (qualitySettings) {

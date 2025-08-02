@@ -77,7 +77,25 @@ export class USTXLyricsManager {
   }
 
   // Update lyrics for a specific verse
-  updateVerseLyrics(verseNumber: number, newLyrics: string): USTXData {
+  async updateVerseLyrics(verseNumber: number, newLyrics: string, singerId: string = 'fem_1_ln'): Promise<USTXData> {
+    try {
+      const verses = await this.detectVersesWithCLI(singerId);
+      const targetVerse = verses.find(v => v.verseNumber === verseNumber);
+      
+      if (!targetVerse) {
+        console.warn(`CLI: Verse ${verseNumber} not found, trying fallback`);
+        return this.updateVerseLyricsSync(verseNumber, newLyrics);
+      }
+      
+      return this.applyVerseUpdate(targetVerse, newLyrics);
+    } catch (error) {
+      console.error('Error with CLI verse update, falling back:', error);
+      return this.updateVerseLyricsSync(verseNumber, newLyrics);
+    }
+  }
+
+  // Fallback synchronous version using old detection
+  private updateVerseLyricsSync(verseNumber: number, newLyrics: string): USTXData {
     const verses = this.detectVerses();
     const targetVerse = verses.find(v => v.verseNumber === verseNumber);
     
@@ -85,6 +103,12 @@ export class USTXLyricsManager {
       console.warn(`Verse ${verseNumber} not found, updating all lyrics`);
       return this.updateAllLyrics(newLyrics);
     }
+    
+    return this.applyVerseUpdate(targetVerse, newLyrics);
+  }
+
+  // Extract the verse update logic into a separate method
+  private applyVerseUpdate(targetVerse: any, newLyrics: string): USTXData {
 
     const vocalPart = this.getVocalPart();
     if (!vocalPart?.notes) return this.ustxData;
@@ -151,7 +175,7 @@ export class USTXLyricsManager {
   }
 
   // Update lyrics for multiple verses
-  updateMultipleVerses(verseResults: Array<{verse_number: number, new_lyrics: string}>): USTXData {
+  async updateMultipleVerses(verseResults: Array<{verse_number: number, new_lyrics: string}>): Promise<USTXData> {
     let updatedUSTX = this.ustxData;
     
     // Sort by verse number to maintain order
@@ -160,7 +184,7 @@ export class USTXLyricsManager {
     // Apply each verse update sequentially
     for (const result of sortedResults) {
       const manager = new USTXLyricsManager(updatedUSTX);
-      updatedUSTX = manager.updateVerseLyrics(result.verse_number, result.new_lyrics);
+      updatedUSTX = await manager.updateVerseLyrics(result.verse_number, result.new_lyrics, 'fem_1_ln');
     }
     
     console.log(`Updated ${verseResults.length} verses:`, verseResults.map(r => `Verse ${r.verse_number}`));
@@ -168,10 +192,10 @@ export class USTXLyricsManager {
   }
 
   // Update lyrics for multiple verses with streaming callback (updates UI progressively)
-  updateMultipleVersesStreaming(
+  async updateMultipleVersesStreaming(
     verseResults: Array<{verse_number: number, new_lyrics: string}>,
     onVerseUpdate: (updatedUSTX: USTXData, verseNumber: number, progress: {current: number, total: number}) => void
-  ): USTXData {
+  ): Promise<USTXData> {
     let updatedUSTX = this.ustxData;
     
     // Sort by verse number to maintain order
@@ -181,7 +205,7 @@ export class USTXLyricsManager {
     for (let i = 0; i < sortedResults.length; i++) {
       const result = sortedResults[i];
       const manager = new USTXLyricsManager(updatedUSTX);
-      updatedUSTX = manager.updateVerseLyrics(result.verse_number, result.new_lyrics);
+      updatedUSTX = await manager.updateVerseLyrics(result.verse_number, result.new_lyrics, 'fem_1_ln');
       
       // Call callback immediately after each verse update
       onVerseUpdate(updatedUSTX, result.verse_number, {
@@ -726,13 +750,164 @@ export class USTXLyricsManager {
     return isCurrentEnder || isNextStarter;
   }
 
-  // Enhanced verse detection using original AP-based approach
+  // Enhanced verse detection - DiffSinger script approach
+  async detectVersesWithPhonemizer(singerId: string = 'fem_1_ln'): Promise<VerseSegment[]> {
+    console.log('[DIFFSTYLE-VERSES] Using DiffSinger-style phoneme processing for verse detection');
+    
+    try {
+      // Call the phonemize API exactly like DiffSinger script does
+      const response = await fetch('/api/phonemize', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ustxData: this.ustxData,
+          singerId: singerId
+        })
+      });
+
+      if (!response.ok) {
+        console.error('[DIFFSTYLE-VERSES] Phonemize API failed:', response.status);
+        return this.detectVerses(); // Fallback
+      }
+
+      const result = await response.json();
+      const phonemes = result.phonemes || [];
+      
+      console.log(`[DIFFSTYLE-VERSES] Received ${phonemes.length} processed phonemes`);
+      console.log(`[DIFFSTYLE-VERSES] SP phonemes found: ${result.debug.silencePhonemes}`);
+
+      // Process phonemes to create verses exactly like DiffSinger would
+      return this.createVersesFromProcessedPhonemes(phonemes);
+
+    } catch (error) {
+      console.error('[DIFFSTYLE-VERSES] Error processing phonemes:', error);
+      return this.detectVerses(); // Fallback
+    }
+  }
+
+  // Create verses using exact RenderPhrase.FromPart logic with phoneme timings
+  private createVersesFromProcessedPhonemes(phonemes: any[]): VerseSegment[] {
+    if (!phonemes || phonemes.length === 0) {
+      return [];
+    }
+
+    console.log(`[PHONEME-VERSES] Using exact RenderPhrase.FromPart logic with ${phonemes.length} phonemes`);
+
+    // Sort phonemes by timing (exactly like RenderPhrase.FromPart does with phonemes)
+    const sortedPhonemes = phonemes
+      .sort((a, b) => a.TimeMs - b.TimeMs);
+
+    if (sortedPhonemes.length === 0) {
+      return [];
+    }
+
+    // Group phonemes into phrases using RenderPhrase.FromPart line 501 logic:
+    // if (phonemes[i - 1].End != phonemes[i].position)
+    const phrases: any[][] = [];
+    let currentPhrase: any[] = [sortedPhonemes[0]];
+
+    for (let i = 1; i < sortedPhonemes.length; i++) {
+      const prevPhoneme = sortedPhonemes[i - 1];
+      const currPhoneme = sortedPhonemes[i];
+      
+      // Use EXACT RenderPhrase.FromPart logic: if (phonemes[i - 1].End != phonemes[i].position)
+      const prevEnd = prevPhoneme.End || 0;
+      const currPosition = currPhoneme.Position || 0;
+      
+      // Exact comparison - no tolerance (just like RenderPhrase.FromPart line 501)
+      const hasGap = prevEnd !== currPosition;
+      
+      if (hasGap) {
+        // End current phrase
+        phrases.push(currentPhrase);
+        console.log(`[PHONEME-VERSES] Phrase boundary at gap: ${prevEnd} → ${currPosition} (${currentPhrase.length} phonemes)`);
+        
+        // Start new phrase
+        currentPhrase = [currPhoneme];
+      } else {
+        // Continue current phrase
+        currentPhrase.push(currPhoneme);
+      }
+    }
+    
+    // Add final phrase
+    if (currentPhrase.length > 0) {
+      phrases.push(currentPhrase);
+      console.log(`[PHONEME-VERSES] Final phrase: ${currentPhrase.length} phonemes`);
+    }
+
+    console.log(`[PHONEME-VERSES] Split into ${phrases.length} phrases`);
+
+    // Convert phrases to verses
+    const verses: VerseSegment[] = [];
+
+    for (let phraseIndex = 0; phraseIndex < phrases.length; phraseIndex++) {
+      const phrasePhonemes = phrases[phraseIndex];
+      
+      if (phrasePhonemes.length === 0) continue;
+
+      const phraseStartTime = phrasePhonemes[0].TimeMs;
+      const phraseEndTime = phrasePhonemes[phrasePhonemes.length - 1].TimeMs;
+
+      // Get the notes that correspond to this phrase timeframe
+      const vocalPart = this.getVocalPart();
+      if (!vocalPart?.notes) continue;
+
+      const lyricalNotes = vocalPart.notes
+        .filter(note => note.lyric && !note.lyric.startsWith('+') && 
+                       note.lyric !== 'SP' && note.lyric !== 'AP')
+        .sort((a, b) => a.position - b.position);
+
+      // Map phonemes back to notes by note index
+      const phraseNoteIndices = new Set<number>();
+      phrasePhonemes.forEach(phoneme => {
+        if (typeof phoneme.NoteIndex === 'number' && phoneme.NoteIndex >= 0 && phoneme.NoteIndex < lyricalNotes.length) {
+          phraseNoteIndices.add(phoneme.NoteIndex);
+        }
+      });
+
+      const phraseNoteIndicesArray = Array.from(phraseNoteIndices).sort((a, b) => a - b);
+      
+      if (phraseNoteIndicesArray.length === 0) continue;
+
+      const startNoteIndex = phraseNoteIndicesArray[0];
+      const endNoteIndex = phraseNoteIndicesArray[phraseNoteIndicesArray.length - 1];
+      
+      // Get lyrics from the notes in this phrase
+      const phraseNotes = phraseNoteIndicesArray.map(idx => lyricalNotes[idx]);
+      const verseLyrics = phraseNotes.map(note => note.lyric).join(' ');
+
+      // Add SP like DiffSinger script (.Prepend("SP").Append("SP"))
+      const finalLyrics = verseLyrics + ' SP';
+
+      verses.push({
+        verseNumber: phraseIndex + 1,
+        startNoteIndex,
+        endNoteIndex,
+        lyrics: finalLyrics,
+        duration: phraseNotes[phraseNotes.length - 1].position + phraseNotes[phraseNotes.length - 1].duration - phraseNotes[0].position
+      });
+
+      console.log(`[PHONEME-VERSES] Verse ${phraseIndex + 1}: "${finalLyrics}" (notes ${startNoteIndex}-${endNoteIndex})`);
+    }
+
+    return verses;
+  }
+
+  // CLI-style verse detection (primary method)
   detectVerses(): VerseSegment[] {
-    // Use the original AP phoneme override detection (this was working better)
-    const apBasedPhrases = this.detectNoteBasedVerses();
-    if (apBasedPhrases.length > 0) {
-      console.log('Using original AP phoneme override detection');
-      return apBasedPhrases;
+    // First try to use the CLI phrase generation API (most accurate)
+    console.log('Attempting CLI phrase generation API for exact phrase detection');
+    // Note: This will be called asynchronously via detectVersesWithCLI()
+    
+    // Fallback to timing gap detection
+    console.log('Using CLI-style timing gap detection as fallback (matching RenderPhrase.FromPart logic)');
+    const timingGapPhrases = this.detectTimingGapPhrases();
+    if (timingGapPhrases.length > 0) {
+      console.log(`CLI-style detection found ${timingGapPhrases.length} phrases`);
+      return timingGapPhrases;
     }
 
     // Use phoneme-based detection if available (accounts for phoneme overrides)
@@ -756,8 +931,15 @@ export class USTXLyricsManager {
       }));
     }
     
-    // Fallback to original note-based detection
-    return this.detectNoteBasedVerses();
+    // Fallback to AP phoneme override detection
+    const apBasedPhrases = this.detectNoteBasedVerses();
+    if (apBasedPhrases.length > 0) {
+      console.log('Fallback: Using AP phoneme override detection');
+      return apBasedPhrases;
+    }
+
+    console.log('No phrases detected by any method');
+    return [];
   }
 
   // Original note-based detection (renamed)
@@ -882,10 +1064,164 @@ export class USTXLyricsManager {
     this.phonemeData = this.convertPhonemeData(cliPhonemeData);
   }
 
+  // CLI-based phrase detection using actual OpenUtau CLI
+  async detectVersesWithCLI(singerId: string = 'fem_1_ln'): Promise<VerseSegment[]> {
+    console.log('[CLI-PHRASES] Using actual OpenUtau CLI for phrase detection');
+    
+    try {
+      // Call the phrases API
+      const response = await fetch('/api/phrases', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ustxData: this.ustxData,
+          singerId: singerId
+        })
+      });
+
+      if (!response.ok) {
+        console.error('[CLI-PHRASES] Phrases API failed:', response.status);
+        return this.detectVerses(); // Fallback
+      }
+
+      const result = await response.json();
+      console.log(`[CLI-PHRASES] CLI generated ${result.totalPhrases} phrases`);
+      
+      // Map CLI phrases to note indices using timing information
+      // IMPORTANT: Use the same note filtering as applyVerseUpdate() to ensure consistent indexing
+      const vocalPart = this.getVocalPart();
+      if (!vocalPart?.notes) return [];
+      
+      // Filter to only lyrical notes (same as applyVerseUpdate method)
+      const lyricalNotes = vocalPart.notes.filter(note => 
+        note.lyric && note.lyric.trim() !== '' && !note.lyric.startsWith('+')
+      );
+      
+      const msPerTick = 60000 / (this.ustxData.bpm * this.ustxData.resolution);
+
+      // Convert CLI phrases to verse segments
+      const verses: VerseSegment[] = result.phrases.map((phrase: any) => {
+        // Find lyrical notes that overlap with this phrase's timing
+        const phraseStartMs = phrase.startTimeMs;
+        const phraseEndMs = phrase.endTimeMs;
+        
+        let startNoteIndex = -1;
+        let endNoteIndex = -1;
+        
+        // Map timing to lyrical note indices (consistent with applyVerseUpdate)
+        for (let i = 0; i < lyricalNotes.length; i++) {
+          const note = lyricalNotes[i];
+          const noteStartMs = note.position * msPerTick;
+          const noteEndMs = (note.position + note.duration) * msPerTick;
+          
+          // Find first lyrical note that overlaps with phrase start
+          if (startNoteIndex === -1 && noteEndMs > phraseStartMs) {
+            startNoteIndex = i;
+          }
+          
+          // Find last lyrical note that starts within this phrase
+          if (noteStartMs >= phraseStartMs && noteStartMs < phraseEndMs) {
+            endNoteIndex = i;
+          }
+        }
+        
+        // Debug: show what lyrical notes are in this range
+        const rangeNotes = lyricalNotes.slice(startNoteIndex, endNoteIndex + 1);
+        const rangeNoteTexts = rangeNotes.map(n => n.lyric).join(' ');
+        console.log(`[CLI-PHRASES] Phrase ${phrase.phraseNumber}: "${phrase.lyrics}"`);
+        console.log(`  → lyrical notes ${startNoteIndex}-${endNoteIndex} (${phraseStartMs.toFixed(0)}-${phraseEndMs.toFixed(0)}ms)`);
+        console.log(`  → actual lyrical notes: "${rangeNoteTexts}"`);
+        
+        return {
+          verseNumber: phrase.phraseNumber,
+          startNoteIndex: Math.max(0, startNoteIndex),
+          endNoteIndex: Math.max(0, endNoteIndex),
+          lyrics: phrase.lyrics,
+          duration: phrase.durationMs
+        };
+      });
+
+      console.log(`[CLI-PHRASES] Converted to ${verses.length} verse segments`);
+      return verses;
+
+    } catch (error) {
+      console.error('[CLI-PHRASES] Error calling CLI phrases API:', error);
+      return this.detectVerses(); // Fallback
+    }
+  }
+
+  // Simple direct verse detection that groups consecutive lyrical notes
+  detectVersesSimple(): VerseSegment[] {
+    console.log('Using simple direct verse detection (grouping consecutive notes)');
+    
+    const vocalPart = this.getVocalPart();
+    if (!vocalPart?.notes) {
+      console.log('No vocal part found');
+      return [];
+    }
+
+    // Get all lyrical notes (excluding + syllables, SP, AP)
+    const lyricalNotes = vocalPart.notes
+      .filter(note => 
+        note.lyric && 
+        note.lyric.trim() !== '' && 
+        !note.lyric.startsWith('+') &&
+        note.lyric !== 'SP' && 
+        note.lyric !== 'AP'
+      )
+      .sort((a, b) => a.position - b.position);
+
+    console.log('Simple detection - lyrical notes:', lyricalNotes.map(n => n.lyric));
+
+    if (lyricalNotes.length === 0) {
+      return [];
+    }
+
+    // Simple approach: group notes into verses of approximately 8-12 words each
+    const verses: VerseSegment[] = [];
+    const wordsPerVerse = 10; // Target words per verse
+    let currentVerseStart = 0;
+    let currentWordCount = 0;
+    let verseNumber = 1;
+
+    for (let i = 0; i < lyricalNotes.length; i++) {
+      currentWordCount++;
+      
+      // End verse when we hit target word count OR at the last note
+      const shouldEndVerse = currentWordCount >= wordsPerVerse || i === lyricalNotes.length - 1;
+      
+      if (shouldEndVerse) {
+        const verseNotes = lyricalNotes.slice(currentVerseStart, i + 1);
+        const verseLyrics = verseNotes.map(note => note.lyric).join(' ');
+        
+        verses.push({
+          verseNumber: verseNumber,
+          startNoteIndex: currentVerseStart,
+          endNoteIndex: i,
+          lyrics: verseLyrics,
+          duration: verseNotes[verseNotes.length - 1].position + verseNotes[verseNotes.length - 1].duration - verseNotes[0].position
+        });
+
+        console.log(`Simple detection - Verse ${verseNumber}: "${verseLyrics}"`);
+        
+        // Start next verse
+        currentVerseStart = i + 1;
+        currentWordCount = 0;
+        verseNumber++;
+      }
+    }
+
+    return verses;
+  }
+
   // Get metadata for API (without sending full USTX)
-  getLyricsMetadata() {
-    console.log('Getting lyrics metadata...');
-    const verses = this.detectVerses();
+  async getLyricsMetadata(singerId: string = 'fem_1_ln') {
+    console.log('Getting lyrics metadata using SIMPLE direct detection...');
+    
+    // Use simple direct detection instead of complex CLI/timing methods
+    const verses = this.detectVersesSimple();
     const allLyrics = this.getAllLyrics();
     
     const metadata = {
@@ -898,10 +1234,10 @@ export class USTXLyricsManager {
         wordCount: v.lyrics.split(' ').length
       })),
       hasPhonemeData: !!this.phonemeData && this.phonemeData.length > 0,
-      detectionMethod: this.phonemeData ? 'phoneme-based' : 'note-based'
+      detectionMethod: 'simple-direct'
     };
 
-    console.log('Generated lyrics metadata:', metadata);
+    console.log('Generated SIMPLE lyrics metadata:', metadata);
     return metadata;
   }
 }
