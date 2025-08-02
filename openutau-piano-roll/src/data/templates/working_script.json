@@ -1,0 +1,818 @@
+{
+    "name": "white_flag_test",
+    "comment": "Test file based on White Flag structure - D minor, 86 BPM",
+    "output_dir": "Vocal",
+    "cache_dir": "UCache",
+    "ustx_version": "0.6",
+    "resolution": 480,
+    "bpm": 90,
+    "beat_per_bar": 4,
+    "beat_unit": 4,
+    "expressions": {
+        "dyn": {
+            "name": "dynamics (curve)",
+            "abbr": "dyn",
+            "type": "Curve",
+            "min": -240,
+            "max": 120,
+            "default_value": 0,
+            "is_flag": false,
+            "flag": ""
+        },
+        "pitd": {
+            "name": "pitch deviation (curve)",
+            "abbr": "pitd",
+            "type": "Curve",
+            "min": -1200,
+            "max": 1200,
+            "default_value": 0,
+            "is_flag": false,
+            "flag": ""
+        },
+        "clr": {
+            "name": "voice color",
+            "abbr": "clr",
+            "type": "Options",
+            "min": 0,
+            "max": -1,
+            "default_value": 0,
+            "is_flag": false,
+            "options": []
+        },
+        "eng": {
+            "name": "resampler engine",
+            "abbr": "eng",
+            "type": "Options",
+            "min": 0,
+            "max": 1,
+            "default_value": 0,
+            "is_flag": false,
+            "options": [
+                "",
+                "worldline"
+            ]
+        },
+        "vel": {
+            "name": "velocity",
+            "abbr": "vel",
+            "type": "Numerical",
+            "min": 0,
+            "max": 200,
+            "default_value": 100,
+            "is_flag": false,
+            "flag": ""
+        },
+        "vol": {
+            "name": "volume",
+            "abbr": "vol",
+            "type": "Numerical",
+            "min": 0,
+            "max": 200,
+            "default_value": 100,
+            "is_flag": false,
+            "flag": ""
+        },
+        "atk": {
+            "name": "attack",
+            "abbr": "atk",
+            "type": "Numerical",
+            "min": 0,
+            "max": 200,
+            "default_value": 100,
+            "is_flag": false,
+            "flag": ""
+        },
+        "dec": {
+            "name": "decay",
+            "abbr": "dec",
+            "type": "Numerical",
+            "min": 0,
+            "max": 100,
+            "default_value": 0,
+            "is_flag": false,
+            "flag": ""
+        },
+        "gen": {
+            "name": "gender",
+            "abbr": "gen",
+            "type": "Numerical",
+            "min": -100,
+            "max": 100,
+            "default_value": 0,
+            "is_flag": true,
+            "flag": "g"
+        },
+        "genc": {
+            "name": "gender (curve)",
+            "abbr": "genc",
+            "type": "Curve",
+            "min": -100,
+            "max": 100,
+            "default_value": 0,
+            "is_flag": false,
+            "flag": ""
+        },
+        "bre": {
+            "name": "breath",
+            "abbr": "bre",
+            "type": "Numerical",
+            "min": 0,
+            "max": 100,
+            "default_value": 0,
+            "is_flag": true,
+            "flag": "B"
+        },
+        "brec": {
+            "name": "breathiness (curve)",
+            "abbr": "brec",
+            "type": "Curve",
+            "min": -100,
+            "max": 100,
+            "default_value": 0,
+            "is_flag": false,
+            "flag": ""
+        },
+        "lpf": {
+            "name": "lowpass",
+            "abbr": "lpf",
+            "type": "Numerical",
+            "min": 0,
+            "max": 100,
+            "default_value": 0,
+            "is_flag": true,
+            "flag": "H"
+        },
+        "mod": {
+            "name": "modulation",
+            "abbr": "mod",
+            "type": "Numerical",
+            "min": 0,
+            "max": 100,
+            "default_value": 0,
+            "is_flag": false,
+            "flag": ""
+        },
+        "alt": {
+            "name": "alternate",
+            "abbr": "alt",
+            "type": "Numerical",
+            "min": 0,
+            "max": 16,
+            "default_value": 0,
+            "is_flag": false,
+            "flag": ""
+        },
+        "shft": {
+            "name": "tone shift",
+            "abbr": "shft",
+            "type": "Numerical",
+            "min": -36,
+            "max": 36,
+            "default_value": 0,
+            "is_flag": false,
+            "flag": ""
+        },
+        "shfc": {
+            "name": "tone shift (curve)",
+            "abbr": "shfc",
+            "type": "Curve",
+            "min": -1200,
+            "max": 1200,
+            "default_value": 0,
+            "is_flag": false,
+            "flag": ""
+        },
+        "tenc": {
+            "name": "tension (curve)",
+            "abbr": "tenc",
+            "type": "Curve",
+            "min": -100,
+            "max": 100,
+            "default_value": 0,
+            "is_flag": false,
+            "flag": ""
+        },
+        "voic": {
+            "name": "voicing (curve)",
+            "abbr": "voic",
+            "type": "Curve",
+            "min": 0,
+            "max": 100,
+            "default_value": 100,
+            "is_flag": false,
+            "flag": ""
+        }
+    },
+    "time_signatures": [
+        {
+            "bar_position": 0,
+            "beat_per_bar": 4,
+            "beat_unit": 4
+        }
+    ],
+    "tempos": [
+        {
+            "position": 0,
+            "bpm": 90
+        }
+    ],
+    "tracks": [
+        {
+            "singer": "fem_1",
+            "phonemizer": "OpenUtau.Plugin.Builtin.EnunuOnnxEnglishPhonemizer",
+            "renderer_settings": {
+                "renderer": "DIFFSINGER"
+            },
+            "mute": false,
+            "solo": false,
+            "volume": 0
+        }
+    ],
+    "voice_parts": [
+        {
+            "name": "White Flag Verse & Chorus",
+            "comment": "",
+            "track_no": 0,
+            "position": 0,
+            "notes": [
+                {
+                    "position": 0,
+                    "duration": 240,
+                    "tone": 62,
+                    "lyric": "I",
+                    "pitch": {
+                        "data": [
+                            {
+                                "x": -40,
+                                "y": 0,
+                                "shape": "io"
+                            },
+                            {
+                                "x": 40,
+                                "y": 0,
+                                "shape": "io"
+                            }
+                        ],
+                        "snap_first": true
+                    },
+                    "vibrato": {
+                        "length": 0,
+                        "period": 175,
+                        "depth": 25,
+                        "in": 10,
+                        "out": 10,
+                        "shift": 0,
+                        "drift": 0
+                    },
+                    "phoneme_expressions": [],
+                    "phoneme_overrides": []
+                },
+                {
+                    "position": 240,
+                    "duration": 360,
+                    "tone": 65,
+                    "lyric": "know",
+                    "pitch": {
+                        "data": [
+                            {
+                                "x": -40,
+                                "y": 0,
+                                "shape": "io"
+                            },
+                            {
+                                "x": 40,
+                                "y": 0,
+                                "shape": "io"
+                            }
+                        ],
+                        "snap_first": true
+                    },
+                    "vibrato": {
+                        "length": 0,
+                        "period": 175,
+                        "depth": 25,
+                        "in": 10,
+                        "out": 10,
+                        "shift": 0,
+                        "drift": 0
+                    },
+                    "phoneme_expressions": [],
+                    "phoneme_overrides": []
+                },
+                {
+                    "position": 600,
+                    "duration": 240,
+                    "tone": 65,
+                    "lyric": "you",
+                    "pitch": {
+                        "data": [
+                            {
+                                "x": -40,
+                                "y": 0,
+                                "shape": "io"
+                            },
+                            {
+                                "x": 40,
+                                "y": 0,
+                                "shape": "io"
+                            }
+                        ],
+                        "snap_first": true
+                    },
+                    "vibrato": {
+                        "length": 0,
+                        "period": 175,
+                        "depth": 25,
+                        "in": 10,
+                        "out": 10,
+                        "shift": 0,
+                        "drift": 0
+                    },
+                    "phoneme_expressions": [],
+                    "phoneme_overrides": []
+                },
+                {
+                    "position": 840,
+                    "duration": 360,
+                    "tone": 67,
+                    "lyric": "think",
+                    "pitch": {
+                        "data": [
+                            {
+                                "x": -40,
+                                "y": 0,
+                                "shape": "io"
+                            },
+                            {
+                                "x": 40,
+                                "y": 0,
+                                "shape": "io"
+                            }
+                        ],
+                        "snap_first": true
+                    },
+                    "vibrato": {
+                        "length": 0,
+                        "period": 175,
+                        "depth": 25,
+                        "in": 10,
+                        "out": 10,
+                        "shift": 0,
+                        "drift": 0
+                    },
+                    "phoneme_expressions": [],
+                    "phoneme_overrides": []
+                },
+                {
+                    "position": 1200,
+                    "duration": 240,
+                    "tone": 65,
+                    "lyric": "that",
+                    "pitch": {
+                        "data": [
+                            {
+                                "x": -40,
+                                "y": 0,
+                                "shape": "io"
+                            },
+                            {
+                                "x": 40,
+                                "y": 0,
+                                "shape": "io"
+                            }
+                        ],
+                        "snap_first": true
+                    },
+                    "vibrato": {
+                        "length": 0,
+                        "period": 175,
+                        "depth": 25,
+                        "in": 10,
+                        "out": 10,
+                        "shift": 0,
+                        "drift": 0
+                    },
+                    "phoneme_expressions": [],
+                    "phoneme_overrides": []
+                },
+                {
+                    "position": 1440,
+                    "duration": 240,
+                    "tone": 62,
+                    "lyric": "I",
+                    "pitch": {
+                        "data": [
+                            {
+                                "x": -40,
+                                "y": 0,
+                                "shape": "io"
+                            },
+                            {
+                                "x": 40,
+                                "y": 0,
+                                "shape": "io"
+                            }
+                        ],
+                        "snap_first": true
+                    },
+                    "vibrato": {
+                        "length": 0,
+                        "period": 175,
+                        "depth": 25,
+                        "in": 10,
+                        "out": 10,
+                        "shift": 0,
+                        "drift": 0
+                    },
+                    "phoneme_expressions": [],
+                    "phoneme_overrides": []
+                },
+                {
+                    "position": 1680,
+                    "duration": 480,
+                    "tone": 60,
+                    "lyric": "don't",
+                    "pitch": {
+                        "data": [
+                            {
+                                "x": -40,
+                                "y": 0,
+                                "shape": "io"
+                            },
+                            {
+                                "x": 40,
+                                "y": 0,
+                                "shape": "io"
+                            }
+                        ],
+                        "snap_first": true
+                    },
+                    "vibrato": {
+                        "length": 0,
+                        "period": 175,
+                        "depth": 25,
+                        "in": 10,
+                        "out": 10,
+                        "shift": 0,
+                        "drift": 0
+                    },
+                    "phoneme_expressions": [],
+                    "phoneme_overrides": []
+                },
+                {
+                    "position": 2160,
+                    "duration": 720,
+                    "tone": 62,
+                    "lyric": "care",
+                    "pitch": {
+                        "data": [
+                            {
+                                "x": -40,
+                                "y": 0,
+                                "shape": "io"
+                            },
+                            {
+                                "x": 40,
+                                "y": 0,
+                                "shape": "io"
+                            }
+                        ],
+                        "snap_first": true
+                    },
+                    "vibrato": {
+                        "length": 0,
+                        "period": 175,
+                        "depth": 25,
+                        "in": 10,
+                        "out": 10,
+                        "shift": 0,
+                        "drift": 0
+                    },
+                    "phoneme_expressions": [],
+                    "phoneme_overrides": []
+                },
+                {
+                    "position": 3360,
+                    "duration": 240,
+                    "tone": 65,
+                    "lyric": "But",
+                    "pitch": {
+                        "data": [
+                            {
+                                "x": -40,
+                                "y": 0,
+                                "shape": "io"
+                            },
+                            {
+                                "x": 40,
+                                "y": 0,
+                                "shape": "io"
+                            }
+                        ],
+                        "snap_first": true
+                    },
+                    "vibrato": {
+                        "length": 0,
+                        "period": 175,
+                        "depth": 25,
+                        "in": 10,
+                        "out": 10,
+                        "shift": 0,
+                        "drift": 0
+                    },
+                    "phoneme_expressions": [],
+                    "phoneme_overrides": []
+                },
+                {
+                    "position": 3600,
+                    "duration": 240,
+                    "tone": 67,
+                    "lyric": "I",
+                    "pitch": {
+                        "data": [
+                            {
+                                "x": -40,
+                                "y": 0,
+                                "shape": "io"
+                            },
+                            {
+                                "x": 40,
+                                "y": 0,
+                                "shape": "io"
+                            }
+                        ],
+                        "snap_first": true
+                    },
+                    "vibrato": {
+                        "length": 0,
+                        "period": 175,
+                        "depth": 25,
+                        "in": 10,
+                        "out": 10,
+                        "shift": 0,
+                        "drift": 0
+                    },
+                    "phoneme_expressions": [],
+                    "phoneme_overrides": []
+                },
+                {
+                    "position": 3840,
+                    "duration": 360,
+                    "tone": 69,
+                    "lyric": "will",
+                    "pitch": {
+                        "data": [
+                            {
+                                "x": -40,
+                                "y": 0,
+                                "shape": "io"
+                            },
+                            {
+                                "x": 40,
+                                "y": 0,
+                                "shape": "io"
+                            }
+                        ],
+                        "snap_first": true
+                    },
+                    "vibrato": {
+                        "length": 0,
+                        "period": 175,
+                        "depth": 25,
+                        "in": 10,
+                        "out": 10,
+                        "shift": 0,
+                        "drift": 0
+                    },
+                    "phoneme_expressions": [],
+                    "phoneme_overrides": []
+                },
+                {
+                    "position": 4200,
+                    "duration": 240,
+                    "tone": 65,
+                    "lyric": "not",
+                    "pitch": {
+                        "data": [
+                            {
+                                "x": -40,
+                                "y": 0,
+                                "shape": "io"
+                            },
+                            {
+                                "x": 40,
+                                "y": 0,
+                                "shape": "io"
+                            }
+                        ],
+                        "snap_first": true
+                    },
+                    "vibrato": {
+                        "length": 0,
+                        "period": 175,
+                        "depth": 25,
+                        "in": 10,
+                        "out": 10,
+                        "shift": 0,
+                        "drift": 0
+                    },
+                    "phoneme_expressions": [],
+                    "phoneme_overrides": []
+                },
+                {
+                    "position": 4440,
+                    "duration": 480,
+                    "tone": 62,
+                    "lyric": "sur",
+                    "pitch": {
+                        "data": [
+                            {
+                                "x": -40,
+                                "y": 0,
+                                "shape": "io"
+                            },
+                            {
+                                "x": 40,
+                                "y": 0,
+                                "shape": "io"
+                            }
+                        ],
+                        "snap_first": true
+                    },
+                    "vibrato": {
+                        "length": 0,
+                        "period": 175,
+                        "depth": 25,
+                        "in": 10,
+                        "out": 10,
+                        "shift": 0,
+                        "drift": 0
+                    },
+                    "phoneme_expressions": [],
+                    "phoneme_overrides": []
+                },
+                {
+                    "position": 4920,
+                    "duration": 240,
+                    "tone": 60,
+                    "lyric": "ren",
+                    "pitch": {
+                        "data": [
+                            {
+                                "x": -40,
+                                "y": 0,
+                                "shape": "io"
+                            },
+                            {
+                                "x": 40,
+                                "y": 0,
+                                "shape": "io"
+                            }
+                        ],
+                        "snap_first": true
+                    },
+                    "vibrato": {
+                        "length": 0,
+                        "period": 175,
+                        "depth": 25,
+                        "in": 10,
+                        "out": 10,
+                        "shift": 0,
+                        "drift": 0
+                    },
+                    "phoneme_expressions": [],
+                    "phoneme_overrides": []
+                },
+                {
+                    "position": 5160,
+                    "duration": 960,
+                    "tone": 62,
+                    "lyric": "der",
+                    "pitch": {
+                        "data": [
+                            {
+                                "x": -40,
+                                "y": 0,
+                                "shape": "io"
+                            },
+                            {
+                                "x": 40,
+                                "y": 0,
+                                "shape": "io"
+                            }
+                        ],
+                        "snap_first": true
+                    },
+                    "vibrato": {
+                        "length": 0,
+                        "period": 175,
+                        "depth": 25,
+                        "in": 10,
+                        "out": 10,
+                        "shift": 0,
+                        "drift": 0
+                    },
+                    "phoneme_expressions": [],
+                    "phoneme_overrides": []
+                },
+                {
+                    "position": 6720,
+                    "duration": 360,
+                    "tone": 67,
+                    "lyric": "No",
+                    "pitch": {
+                        "data": [
+                            {
+                                "x": -40,
+                                "y": 0,
+                                "shape": "io"
+                            },
+                            {
+                                "x": 40,
+                                "y": 0,
+                                "shape": "io"
+                            }
+                        ],
+                        "snap_first": true
+                    },
+                    "vibrato": {
+                        "length": 0,
+                        "period": 175,
+                        "depth": 25,
+                        "in": 10,
+                        "out": 10,
+                        "shift": 0,
+                        "drift": 0
+                    },
+                    "phoneme_expressions": [],
+                    "phoneme_overrides": []
+                },
+                {
+                    "position": 7080,
+                    "duration": 480,
+                    "tone": 69,
+                    "lyric": "white",
+                    "pitch": {
+                        "data": [
+                            {
+                                "x": -40,
+                                "y": 0,
+                                "shape": "io"
+                            },
+                            {
+                                "x": 40,
+                                "y": 0,
+                                "shape": "io"
+                            }
+                        ],
+                        "snap_first": true
+                    },
+                    "vibrato": {
+                        "length": 0,
+                        "period": 175,
+                        "depth": 25,
+                        "in": 10,
+                        "out": 10,
+                        "shift": 0,
+                        "drift": 0
+                    },
+                    "phoneme_expressions": [],
+                    "phoneme_overrides": []
+                },
+                {
+                    "position": 7560,
+                    "duration": 720,
+                    "tone": 65,
+                    "lyric": "flag",
+                    "pitch": {
+                        "data": [
+                            {
+                                "x": -40,
+                                "y": 0,
+                                "shape": "io"
+                            },
+                            {
+                                "x": 40,
+                                "y": 0,
+                                "shape": "io"
+                            }
+                        ],
+                        "snap_first": true
+                    },
+                    "vibrato": {
+                        "length": 0,
+                        "period": 175,
+                        "depth": 25,
+                        "in": 10,
+                        "out": 10,
+                        "shift": 0,
+                        "drift": 0
+                    },
+                    "phoneme_expressions": [],
+                    "phoneme_overrides": []
+                }
+            ]
+        }
+    ],
+    "wave_parts": []
+}
