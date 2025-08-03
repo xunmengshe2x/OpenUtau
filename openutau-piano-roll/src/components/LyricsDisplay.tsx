@@ -28,7 +28,10 @@ interface LyricsDisplayProps {
   onNoteClick?: (note: USTXNote) => void;
   onLyricEdit?: (noteIndex: number, newLyric: string) => void;
   onSegmentRender?: (startNoteIndex: number, endNoteIndex: number, lineIndex: number) => void;
+  onSegmentPlay?: (audioUrl: string, lineIndex: number) => void;
+  onSegmentComplete?: (lineIndex: number) => void;
   cachedVerseDetection?: any[];
+  useGPU?: boolean;
 }
 
 const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
@@ -41,12 +44,20 @@ const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
   onNoteClick,
   onLyricEdit,
   onSegmentRender,
-  cachedVerseDetection
+  onSegmentPlay,
+  onSegmentComplete,
+  cachedVerseDetection,
+  useGPU = false
 }) => {
   const [lyricsLines, setLyricsLines] = useState<LyricsLine[]>([]);
   const [highlightedNoteIndex, setHighlightedNoteIndex] = useState<number>(-1);
   const [editingNoteIndex, setEditingNoteIndex] = useState<number>(-1);
   const [editingValue, setEditingValue] = useState<string>('');
+  const [renderedAudioUrls, setRenderedAudioUrls] = useState<Map<number, string>>(new Map());
+  const [isPlayingLine, setIsPlayingLine] = useState<number>(-1);
+  const [renderingLines, setRenderingLines] = useState<Set<number>>(new Set());
+  const [renderStatus, setRenderStatus] = useState<string>('');
+  const [currentAudio, setCurrentAudio] = useState<HTMLAudioElement | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Process USTX data into lyrics lines using DiffSinger-style phoneme processing
@@ -273,16 +284,96 @@ const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
     }
   };
 
-  const handleLineRender = (lineIndex: number) => {
+  const handleLineRender = async (lineIndex: number) => {
     const line = lyricsLines[lineIndex];
     if (!line || !onSegmentRender) return;
 
-    // Use the original startNoteIndex and endNoteIndex from CLI phrase detection
-    // These should be stored in the verse object when we created the line
-    if (line.startNoteIndex !== undefined && line.endNoteIndex !== undefined) {
-      onSegmentRender(line.startNoteIndex, line.endNoteIndex, lineIndex);
+    // Add to rendering set to show loading state
+    setRenderingLines(prev => new Set(prev).add(lineIndex));
+    setRenderStatus(`Rendering verse ${lineIndex + 1}...`);
+
+    try {
+      // Use the original startNoteIndex and endNoteIndex from CLI phrase detection
+      if (line.startNoteIndex !== undefined && line.endNoteIndex !== undefined) {
+        const audioUrl = await onSegmentRender(line.startNoteIndex, line.endNoteIndex, lineIndex);
+        
+        // Store the rendered audio URL
+        if (audioUrl) {
+          addRenderedSegment(lineIndex, audioUrl);
+        }
+        
+        // Call completion callback
+        if (onSegmentComplete) {
+          onSegmentComplete(lineIndex);
+        }
+        
+        setRenderStatus(`✅ Verse ${lineIndex + 1} rendered successfully!`);
+        setTimeout(() => setRenderStatus(''), 3000);
+      }
+    } catch (error) {
+      console.error('Render error:', error);
+      setRenderStatus(`❌ Failed to render verse ${lineIndex + 1}`);
+      setTimeout(() => setRenderStatus(''), 5000);
+    } finally {
+      // Remove from rendering set
+      setRenderingLines(prev => {
+        const newSet = new Set(prev);
+        newSet.delete(lineIndex);
+        return newSet;
+      });
     }
   };
+
+  const handleLinePlay = (lineIndex: number) => {
+    const audioUrl = renderedAudioUrls.get(lineIndex);
+    if (!audioUrl) return;
+
+    // Stop any currently playing audio
+    if (currentAudio) {
+      currentAudio.pause();
+      currentAudio.currentTime = 0;
+    }
+
+    // Create new audio element
+    const audio = new Audio(audioUrl);
+    audio.onplay = () => setIsPlayingLine(lineIndex);
+    audio.onended = () => setIsPlayingLine(-1);
+    audio.onerror = () => {
+      console.error('Audio playback error');
+      setIsPlayingLine(-1);
+    };
+
+    setCurrentAudio(audio);
+    audio.play();
+
+    // Notify parent component
+    if (onSegmentPlay) {
+      onSegmentPlay(audioUrl, lineIndex);
+    }
+  };
+
+  const handleLineStop = () => {
+    if (currentAudio) {
+      currentAudio.pause();
+      currentAudio.currentTime = 0;
+      setIsPlayingLine(-1);
+    }
+  };
+
+  // Add rendered segment URL
+  const addRenderedSegment = (lineIndex: number, audioUrl: string) => {
+    setRenderedAudioUrls(prev => new Map(prev).set(lineIndex, audioUrl));
+  };
+
+  // Cleanup audio when component unmounts
+  React.useEffect(() => {
+    return () => {
+      if (currentAudio) {
+        currentAudio.pause();
+        currentAudio.currentTime = 0;
+      }
+    };
+  }, [currentAudio]);
 
 
   if (!ustxData) {
@@ -321,6 +412,26 @@ const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
         <p className="text-xs text-gray-400 mt-1">
           💡 Double-click lyrics to edit • Click 🎵 Render to preview line
         </p>
+        
+        {/* Render Status */}
+        <AnimatePresence>
+          {renderStatus && (
+            <motion.div
+              initial={{ opacity: 0, y: -10 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -10 }}
+              className={`mt-2 p-2 rounded text-xs font-medium ${
+                renderStatus.includes('✅') 
+                  ? 'bg-green-500/20 text-green-200 border border-green-500/30'
+                  : renderStatus.includes('❌')
+                  ? 'bg-red-500/20 text-red-200 border border-red-500/30'
+                  : 'bg-blue-500/20 text-blue-200 border border-blue-500/30'
+              }`}
+            >
+              {renderStatus}
+            </motion.div>
+          )}
+        </AnimatePresence>
       </motion.div>
 
       {/* Lyrics Content */}
@@ -393,22 +504,70 @@ const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
                   </div>
                 </details>
                 
-                {/* Line metadata */}
+                {/* Line metadata and controls */}
                 <div className="text-xs text-gray-400 flex justify-between items-center">
                   <div>
                     <span>Line {lineIndex + 1}</span>
                     <span className="mx-2">•</span>
                     <span>{line.text.split(' ').filter(word => word.trim()).length} words</span>
+                    {useGPU && <span className="mx-2 text-green-400">⚡ GPU</span>}
                   </div>
-                  <motion.button
-                    whileHover={{ scale: 1.1 }}
-                    whileTap={{ scale: 0.9 }}
-                    onClick={() => handleLineRender(lineIndex)}
-                    className="px-2 py-1 bg-blue-600 hover:bg-blue-500 text-white rounded text-xs transition-colors"
-                    title="Render this line"
-                  >
-                    🎵 Render
-                  </motion.button>
+                  
+                  <div className="flex items-center space-x-2">
+                    {/* Render Button */}
+                    <motion.button
+                      whileHover={{ scale: renderingLines.has(lineIndex) ? 1 : 1.1 }}
+                      whileTap={{ scale: renderingLines.has(lineIndex) ? 1 : 0.9 }}
+                      onClick={() => handleLineRender(lineIndex)}
+                      disabled={renderingLines.has(lineIndex)}
+                      className={`px-2 py-1 text-white rounded text-xs transition-all ${
+                        renderingLines.has(lineIndex)
+                          ? 'bg-orange-500 cursor-not-allowed'
+                          : 'bg-blue-600 hover:bg-blue-500'
+                      }`}
+                      title={renderingLines.has(lineIndex) ? 'Rendering...' : 'Render this line'}
+                    >
+                      {renderingLines.has(lineIndex) ? (
+                        <div className="flex items-center space-x-1">
+                          <motion.div
+                            animate={{ rotate: 360 }}
+                            transition={{ duration: 1, repeat: Infinity, ease: "linear" }}
+                            className="w-3 h-3 border border-white border-t-transparent rounded-full"
+                          />
+                          <span>Rendering</span>
+                        </div>
+                      ) : (
+                        '🎵 Render'
+                      )}
+                    </motion.button>
+
+                    {/* Play Button (only show if audio is available) */}
+                    {renderedAudioUrls.has(lineIndex) && (
+                      <motion.button
+                        whileHover={{ scale: 1.1 }}
+                        whileTap={{ scale: 0.9 }}
+                        onClick={() => isPlayingLine === lineIndex ? handleLineStop() : handleLinePlay(lineIndex)}
+                        className={`px-2 py-1 text-white rounded text-xs transition-colors ${
+                          isPlayingLine === lineIndex
+                            ? 'bg-red-500 hover:bg-red-400'
+                            : 'bg-green-600 hover:bg-green-500'
+                        }`}
+                        title={isPlayingLine === lineIndex ? 'Stop playback' : 'Play rendered segment'}
+                      >
+                        {isPlayingLine === lineIndex ? (
+                          <div className="flex items-center space-x-1">
+                            <div className="w-2 h-2 bg-white rounded-sm" />
+                            <span>Stop</span>
+                          </div>
+                        ) : (
+                          <div className="flex items-center space-x-1">
+                            <div className="w-0 h-0 border-l-[4px] border-l-white border-y-[2px] border-y-transparent" />
+                            <span>Play</span>
+                          </div>
+                        )}
+                      </motion.button>
+                    )}
+                  </div>
                 </div>
               </motion.div>
             ))

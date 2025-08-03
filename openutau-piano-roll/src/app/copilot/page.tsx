@@ -30,6 +30,7 @@ export default function CopilotPage() {
     lineIndex: number;
   } | null>(null);
   const [qualityMode, setQualityMode] = useState<'preview' | 'standard' | 'high' | 'super'>('standard');
+  const [useGPU, setUseGPU] = useState<boolean>(false);
   const [cachedVerseDetection, setCachedVerseDetection] = useState<any[] | null>(null);
   
   const router = useRouter();
@@ -259,7 +260,7 @@ export default function CopilotPage() {
   };
 
   const handleSegmentRender = async (startNoteIndex: number, endNoteIndex: number, lineIndex: number) => {
-    if (!ustxData) return;
+    if (!ustxData) throw new Error('No USTX data available');
 
     setIsRendering(true);
     const qualitySettings = getQualitySettings(qualityMode);
@@ -278,6 +279,7 @@ export default function CopilotPage() {
           startNoteIndex,
           endNoteIndex,
           lineIndex,
+          useGPU,
           qualitySettings
         }),
       });
@@ -287,17 +289,34 @@ export default function CopilotPage() {
         const audioUrl = URL.createObjectURL(audioBlob);
         setSegmentAudio(audioUrl);
         setCurrentSegmentInfo({ startNoteIndex, endNoteIndex, lineIndex });
-        setRenderingStatus(`Line ${lineIndex + 1} rendered successfully!`);
+        setRenderingStatus(`✅ Line ${lineIndex + 1} rendered successfully!`);
+        
+        // Return the audio URL for the LyricsDisplay component to use
+        return audioUrl;
       } else {
-        setRenderingStatus('Segment rendering failed');
+        const errorData = await response.json();
+        throw new Error(errorData.error || 'Render failed');
       }
     } catch (error) {
       console.error('Segment render error:', error);
-      setRenderingStatus('Segment rendering error');
+      setRenderingStatus(`❌ Failed to render line ${lineIndex + 1}: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      throw error; // Re-throw for LyricsDisplay to handle
     } finally {
       setIsRendering(false);
       setTimeout(() => setRenderingStatus(''), 3000);
     }
+  };
+
+  const handleSegmentPlay = (audioUrl: string, lineIndex: number) => {
+    console.log(`🎵 Playing segment ${lineIndex + 1}`);
+    // Switch to segment mode for the main audio player
+    setSegmentAudio(audioUrl);
+    setPlaybackMode('segment');
+  };
+
+  const handleSegmentComplete = (lineIndex: number) => {
+    console.log(`✅ Segment ${lineIndex + 1} completed and saved`);
+    // Could trigger full song refresh here if needed
   };
 
   return (
@@ -374,6 +393,27 @@ export default function CopilotPage() {
               ))}
             </motion.select>
           </div>
+
+          {/* GPU Toggle */}
+          <motion.div className="flex items-center space-x-2">
+            <label className="text-sm text-gray-300">GPU:</label>
+            <motion.button
+              onClick={() => setUseGPU(!useGPU)}
+              className={`relative w-12 h-6 rounded-full transition-all duration-300 ${
+                useGPU ? 'bg-gradient-to-r from-green-500 to-emerald-600' : 'bg-gray-600'
+              }`}
+              whileHover={{ scale: 1.05 }}
+              whileTap={{ scale: 0.95 }}
+            >
+              <motion.div
+                animate={{ x: useGPU ? 24 : 2 }}
+                transition={{ type: "spring", stiffness: 500, damping: 30 }}
+                className={`absolute top-1 w-4 h-4 rounded-full ${
+                  useGPU ? 'bg-white' : 'bg-gray-300'
+                }`}
+              />
+            </motion.button>
+          </motion.div>
 
           <div className="flex items-center space-x-2">
             <label className="text-sm text-gray-300">Singer:</label>
@@ -452,7 +492,10 @@ export default function CopilotPage() {
             onNoteClick={handleNoteSelect}
             onLyricEdit={handleLyricEdit}
             onSegmentRender={handleSegmentRender}
+            onSegmentPlay={handleSegmentPlay}
+            onSegmentComplete={handleSegmentComplete}
             cachedVerseDetection={cachedVerseDetection || undefined}
+            useGPU={useGPU}
           />
         </motion.div>
       </div>

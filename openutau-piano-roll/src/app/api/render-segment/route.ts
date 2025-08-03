@@ -7,8 +7,9 @@ import { join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { segmentCache } from '@/utils/segmentCache';
 
-// Modal configuration - Use 8-core CPU endpoint (fastest and cheapest)
-const MODAL_RENDER_URL = 'https://wwatashi84--openutau-voice-synthesis-render-segment-cpu.modal.run';
+// Modal configuration - Dual endpoint support
+const MODAL_CPU_URL = 'https://wwatashi84--openutau-voice-synthesis-render-segment-cpu.modal.run';
+const MODAL_GPU_URL = 'https://wwatashi84--openutau-voice-synthesis-render-segment.modal.run';
 const USE_MODAL = true; // Set to false to use local CLI
 
 interface SegmentRenderRequest {
@@ -17,6 +18,7 @@ interface SegmentRenderRequest {
   startNoteIndex: number;
   endNoteIndex: number;
   lineIndex?: number;
+  useGPU?: boolean;
   qualitySettings?: {
     diffSingerDepth: number;
     diffSingerSteps: number;
@@ -28,7 +30,7 @@ interface SegmentRenderRequest {
 export async function POST(request: NextRequest) {
   try {
     const requestBody = await request.json();
-    const { ustxData, singerId, startNoteIndex, endNoteIndex, lineIndex, qualitySettings }: SegmentRenderRequest = requestBody;
+    const { ustxData, singerId, startNoteIndex, endNoteIndex, lineIndex, useGPU, qualitySettings }: SegmentRenderRequest = requestBody;
 
     if (!ustxData || !singerId || startNoteIndex == null || endNoteIndex == null) {
       return NextResponse.json({ error: 'Missing required parameters' }, { status: 400 });
@@ -142,10 +144,12 @@ export async function POST(request: NextRequest) {
     // Step 4: Try Modal first, fallback to local CLI if needed
     if (USE_MODAL) {
       try {
-        console.log('🚀 Using Modal 8-core CPU for segment rendering...');
+        const modalUrl = useGPU ? MODAL_GPU_URL : MODAL_CPU_URL;
+        const endpointType = useGPU ? 'GPU' : '8-core CPU';
+        console.log(`🚀 Using Modal ${endpointType} for segment rendering...`);
         console.log(`🎯 DEBUG: Sending to Modal - phraseNumbers=${JSON.stringify(targetPhraseNumbers)}`);
         
-        const modalResponse = await fetch(MODAL_RENDER_URL, {
+        const modalResponse = await fetch(modalUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -166,7 +170,7 @@ export async function POST(request: NextRequest) {
         const modalResult = await modalResponse.json();
         
         if (modalResult.success && modalResult.audio) {
-          console.log(`✅ Modal 8-core CPU segment rendering successful!`);
+          console.log(`✅ Modal ${endpointType} segment rendering successful!`);
           
           // Decode base64 audio
           const audioBuffer = Buffer.from(modalResult.audio, 'base64');
@@ -192,23 +196,24 @@ export async function POST(request: NextRequest) {
               'Content-Length': audioBuffer.length.toString(),
               'Cache-Control': 'public, max-age=86400',
               'X-Segment-Info': JSON.stringify({
-                method: 'modal-8core-cpu-render',
+                method: `modal-${useGPU ? 'gpu' : '8core-cpu'}-render`,
                 phrasesRendered: targetPhraseNumbers,
                 totalPhrases: phrasesData.phrases.length,
                 lineIndex,
                 targetNotes: `${startNoteIndex}-${endNoteIndex}`,
                 cached: false,
                 modalRendered: true,
-                endpoint: '8-core-cpu'
+                endpoint: useGPU ? 'gpu' : '8-core-cpu',
+                useGPU
               })
             },
           });
         } else {
-          console.warn('⚠️ Modal 8-core CPU rendering failed, falling back to local CLI:', modalResult.error);
+          console.warn(`⚠️ Modal ${endpointType} rendering failed, falling back to local CLI:`, modalResult.error);
           // Fall through to local CLI
         }
       } catch (error) {
-        console.warn('⚠️ Modal 8-core CPU request failed, falling back to local CLI:', error);
+        console.warn(`⚠️ Modal ${endpointType} request failed, falling back to local CLI:`, error);
         // Fall through to local CLI  
       }
     }
