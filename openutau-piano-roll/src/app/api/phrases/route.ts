@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-// Modal phonemize endpoint
-const MODAL_PHONEMIZE_URL = 'https://wwatashi84--openutau-voice-synthesis-web-phonemize.modal.run';
+// Modal ds_phrase_extractor endpoint for proper phrase boundaries
+const MODAL_DS_EXTRACTOR_URL = 'https://wwatashi84--openutau-voice-synthesis-ds-phrase-extractor.modal.run';
 
 export async function POST(request: NextRequest) {
   try {
@@ -14,11 +14,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    console.log('[PHRASES-API] Starting phrase generation via Modal for singer:', singerId);
+    console.log('[PHRASES-API] Starting phrase generation via Modal DS Extractor for singer:', singerId);
 
     try {
-      // Call Modal's phonemize endpoint
-      const modalResponse = await fetch(MODAL_PHONEMIZE_URL, {
+      // Call Modal's ds_phrase_extractor endpoint for proper DiffSinger phrase boundaries
+      const modalResponse = await fetch(MODAL_DS_EXTRACTOR_URL, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -30,39 +30,38 @@ export async function POST(request: NextRequest) {
       });
 
       if (!modalResponse.ok) {
-        throw new Error(`Modal phonemize failed: ${modalResponse.status} ${modalResponse.statusText}`);
+        throw new Error(`Modal DS extractor failed: ${modalResponse.status} ${modalResponse.statusText}`);
       }
 
       const modalResult = await modalResponse.json();
       
       if (!modalResult.success) {
-        throw new Error(modalResult.error || 'Modal phonemize returned unsuccessful result');
+        throw new Error(modalResult.error || 'Modal DS extractor returned unsuccessful result');
       }
 
-      console.log(`[PHRASES-API] ✅ Modal phonemize successful - got ${modalResult.total_phonemes} phonemes`);
+      console.log(`[PHRASES-API] ✅ Modal DS extractor successful - got ${modalResult.phrases?.length || 0} phrases`);
 
-      // Convert Modal's phoneme data to the expected phrases format
-      // Modal returns: { success: true, phonemes: [...], total_phonemes: N }
-      // We need to return: { phrases: [...] }
+      // Modal DS extractor returns: { success: true, phrases: [...] }
+      // This is exactly what we need!
       
-      const phrases = modalResult.phonemes || [];
+      const phrases = modalResult.phrases || [];
       
       return NextResponse.json({
         success: true,
         phrases: phrases,
         totalPhrases: phrases.length,
-        method: 'modal-phonemize',
+        method: 'modal-ds-extractor',
         singerId: singerId
       });
 
     } catch (modalError) {
-      console.error('[PHRASES-API] ❌ Modal phonemize failed:', modalError);
+      console.error('[PHRASES-API] ❌ Modal DS extractor failed:', modalError);
       
       // Return error but don't crash the API
       return NextResponse.json({
         error: 'Phrase generation failed',
         details: modalError instanceof Error ? modalError.message : 'Unknown Modal error',
-        method: 'modal-phonemize-failed'
+        method: 'modal-ds-extractor-failed'
       }, { status: 500 });
     }
 
