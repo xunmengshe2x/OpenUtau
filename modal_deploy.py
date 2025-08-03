@@ -1175,25 +1175,11 @@ def web_phonemize(request_data: Dict[str, Any]) -> Dict[str, Any]:
             # Output path for timing data
             output_json = temp_path / "phonemes.json"
             
-            # Build CLI command for phonemization only
-            cli_cmd = [
-                "dotnet", "run",
-                "--project", "/app/openutau/OpenUtau.Cli", 
-                "--",
-                str(ustx_file),
-                singer_id,
-                str(output_json),
-                "--reset-timings",
-                "--preserve-silence-timing"
-            ]
-            
-            print(f"🚀 Executing: {' '.join(cli_cmd)}")
-            
             # Use actual path where singer exists in Modal container
             voicebank_path = f"/app/openutau/{singer_id}"
             cli_command_str = f"mkdir -p /root/.cache/OpenUtau && /app/openutau-build/OpenUtau.Cli {ustx_file} {voicebank_path} {output_json} --reset-timings --preserve-silence-timing"
             
-            print(f"🚀 Web phonemize executing EXACT command like working API: {cli_command_str}")
+            print(f"🚀 Web phonemize executing EXACT phonemize command like working API: {cli_command_str}")
             
             # Execute using bash -c exactly like working Next.js API  
             result = subprocess.run([
@@ -1229,6 +1215,145 @@ def web_phonemize(request_data: Dict[str, Any]) -> Dict[str, Any]:
             "success": False,
             "error": str(e)
         }
+
+
+@app.function(
+    image=image,
+    volumes={"/voicebanks": voicebank_volume},
+    cpu=2,  # CPU-only inference
+    timeout=300
+)
+@modal.fastapi_endpoint(method="POST")
+def ds_phrase_extractor(request_data: Dict[str, Any]) -> Dict[str, Any]:
+    """HTTP endpoint that uses DiffSinger CLI to generate DS file and extracts proper phrase boundaries
+    
+    Uses the exact approach from the working CLI command that generates natural phrase boundaries:
+    rm -rf /home/codespace/.cache/OpenUtau/* && dotnet run --project OpenUtau.Cli -- still_here.ustx fem_1_ln output.ds --diffsinger --reset-timings --phoneme-override dream:0:d:jh
+    """
+    import uuid
+    
+    try:
+        ustx_data = request_data.get('ustxData')
+        singer_id = request_data.get('singerId', 'fem_1_ln')
+        
+        if not ustx_data:
+            return {"success": False, "error": "Missing ustxData"}
+        
+        # Create temporary files for processing
+        with tempfile.TemporaryDirectory() as temp_dir:
+            ustx_file = os.path.join(temp_dir, f"temp_{uuid.uuid4().hex}.ustx")
+            output_ds = os.path.join(temp_dir, "output.ds")
+            
+            # Write USTX data to temporary file
+            with open(ustx_file, 'w', encoding='utf-8') as f:
+                json.dump(ustx_data, f, ensure_ascii=False, indent=2)
+            
+            # Get voicebank path
+            voicebank_path = f"/app/openutau/{singer_id}"
+            if not os.path.exists(voicebank_path):
+                return {"success": False, "error": f"Voicebank {singer_id} not found at {voicebank_path}"}
+            
+            # Use the exact same CLI command as the working approach (generates DS file with proper phrase segmentation)
+            cli_command_str = f"mkdir -p /root/.cache/OpenUtau && rm -rf /root/.cache/OpenUtau/* && /app/openutau-build/OpenUtau.Cli {ustx_file} {voicebank_path} {output_ds} --diffsinger --reset-timings --phoneme-override dream:0:d:jh"
+            
+            # Execute the CLI command
+            print(f"Executing DiffSinger CLI: {cli_command_str}")
+            result = subprocess.run(
+                cli_command_str,
+                shell=True,
+                capture_output=True,
+                text=True,
+                timeout=180,
+                cwd="/app/openutau"
+            )
+            
+            print(f"CLI stdout: {result.stdout}")
+            print(f"CLI stderr: {result.stderr}")
+            print(f"CLI return code: {result.returncode}")
+            
+            if result.returncode != 0:
+                return {"success": False, "error": f"CLI failed: {result.stderr}"}
+            
+            # Read the generated DS file to extract phrase boundaries
+            if not os.path.exists(output_ds):
+                return {"success": False, "error": f"DS file not generated at {output_ds}"}
+            
+            try:
+                with open(output_ds, 'r', encoding='utf-8') as f:
+                    ds_data = json.load(f)
+                
+                print(f"DS file contains {len(ds_data)} phrases")
+                
+                # Extract phrases from DS format - each DS entry is a natural phrase boundary
+                phrases = []
+                cumulative_note_index = 0
+                
+                for i, phrase_data in enumerate(ds_data):
+                    if 'text' in phrase_data and phrase_data['text'].strip():
+                        # Clean up the text (remove SP markers at start/end, keep internal structure)
+                        raw_lyrics = phrase_data['text']
+                        lyrics = raw_lyrics.replace('SP ', '').replace(' SP', '').strip()
+                        
+                        # Skip empty phrases
+                        if not lyrics:
+                            continue
+                        
+                        # Parse phoneme data from DS format
+                        phonemes = []
+                        if 'ph_seq' in phrase_data and 'ph_dur' in phrase_data:
+                            ph_names = phrase_data['ph_seq'].split()
+                            ph_durations = [float(d) for d in phrase_data['ph_dur'].split()]
+                            
+                            # Convert durations from seconds to ticks (assuming 480 ticks per quarter note, 120 BPM)
+                            ticks_per_second = (480 * 120) / 60  # 960 ticks per second
+                            
+                            position_ticks = 0
+                            note_index = cumulative_note_index
+                            
+                            for j, (ph_name, duration_seconds) in enumerate(zip(ph_names, ph_durations)):
+                                duration_ticks = int(duration_seconds * ticks_per_second)
+                                
+                                phonemes.append({
+                                    "phoneme": ph_name,
+                                    "position": position_ticks,
+                                    "duration": duration_ticks,
+                                    "noteIndex": note_index
+                                })
+                                
+                                position_ticks += duration_ticks
+                                
+                                # Approximate note advancement (each note roughly maps to a few phonemes)
+                                if ph_name not in ['SP', 'AP'] and j % 3 == 0:
+                                    note_index += 1
+                        
+                        # Estimate note range for this phrase
+                        estimated_notes = max(1, len([p for p in phonemes if p['phoneme'] not in ['SP', 'AP']]) // 2)
+                        phrase_start_note = cumulative_note_index
+                        phrase_end_note = cumulative_note_index + estimated_notes - 1
+                        cumulative_note_index += estimated_notes
+                        
+                        phrases.append({
+                            "lyrics": lyrics,
+                            "startNoteIndex": phrase_start_note,
+                            "endNoteIndex": phrase_end_note,
+                            "phonemes": phonemes
+                        })
+                        
+                        print(f"Phrase {i+1}: '{lyrics}' ({len(phonemes)} phonemes, notes {phrase_start_note}-{phrase_end_note})")
+                
+                return {
+                    "success": True,
+                    "phrases": phrases,
+                    "total_phonemes": sum(len(p['phonemes']) for p in phrases),
+                    "method": "DiffSinger_DS_File_Natural_Phrases",
+                    "ds_phrases_count": len(ds_data)
+                }
+                
+            except Exception as parse_error:
+                return {"success": False, "error": f"Failed to parse DS file: {str(parse_error)}"}
+                
+    except Exception as e:
+        return {"success": False, "error": f"DS phrase extractor error: {str(e)}"}
 
 
 # Debug function to see what files are available
@@ -1369,6 +1494,7 @@ def main():
     print("💡 Web endpoints:")
     print("  - web_render_segment: For Next.js /api/render-segment")
     print("  - web_phonemize: For Next.js /api/phonemize")
+    print("  - ds_phonemizer: DiffSinger-style phonemization with proper phrase boundaries")
 
 
 if __name__ == "__main__":
