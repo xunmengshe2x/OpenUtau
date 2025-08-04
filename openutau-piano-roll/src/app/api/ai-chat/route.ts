@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { USTXData, USTXNote } from '@/types/openutau';
+import { modifyPitch, parsePitchCommand, PitchModification } from '@/utils/pitchUtils';
 import yaml from 'js-yaml';
 
 interface AIRequest {
@@ -31,10 +32,12 @@ USTX File Structure:
 
 Your capabilities:
 1. LYRICS EDITING: Change note lyrics, handle phonetic symbols, manage syllable timing
-2. PITCH ADJUSTMENT: Modify note tones (MIDI numbers 0-127), add pitch curves
-3. TIMING MODIFICATION: Adjust note positions and durations
+2. PITCH ADJUSTMENT: Modify note tones (MIDI numbers 0-127), add pitch curves, apply pitch shifts
+3. PITCH CURVES: Add pitch bends with shapes (linear, arch, valley, wave) and intensity
 4. VIBRATO CONTROL: Add/modify vibrato parameters (length, period, depth, in, out)
-5. EXPRESSION CONTROL: Modify dynamics, voice color, attack, decay, gender, etc.
+5. PITCH TRANSITIONS: Apply gradual pitch changes across verses or note ranges
+6. TIMING MODIFICATION: Adjust note positions and durations
+7. EXPRESSION CONTROL: Modify dynamics, voice color, attack, decay, gender, etc.
 
 Guidelines:
 - Always preserve the USTX structure and required fields
@@ -52,7 +55,20 @@ When making changes, respond with:
 For pitch references:
 - C4 (Middle C) = 60
 - Each semitone = +1 MIDI note
-- Octave = +12 MIDI notes`;
+- Octave = +12 MIDI notes
+
+Common pitch modification commands:
+- "Make verse 1 higher" → Pitch shift up by 3-5 semitones
+- "Add upward sweep to chorus" → Linear pitch curve with positive intensity
+- "High-low-high transition" → Arch-shaped pitch curve
+- "Add vibrato to sustained notes" → Vibrato on notes longer than quarter note
+- "Raise pitch by 300 cents" → Specific pitch adjustment
+
+Pitch curve shapes:
+- linear: Straight line pitch change
+- arch: Up-down curve (emotional peaks)
+- valley: Down-up curve (tension-release)
+- wave: Oscillating pitch pattern`;
 
 export async function POST(request: NextRequest) {
   try {
@@ -158,6 +174,28 @@ Remember to maintain the exact USTX format and structure.`;
     let updatedUSTX: USTXData | undefined;
     let changes: any[] = [];
 
+    // First, try to handle pitch commands directly using pitch utils
+    if (ustxData) {
+      const pitchModification = parsePitchCommand(message);
+      if (pitchModification) {
+        try {
+          updatedUSTX = modifyPitch(ustxData, pitchModification);
+          changes = generateChangeSummary(ustxData, updatedUSTX);
+          
+          // Override AI message with confirmation
+          const result: AIResponse = {
+            message: `Applied ${pitchModification.type} modification: ${generatePitchDescription(pitchModification, changes)}`,
+            updatedUSTX,
+            changes
+          };
+          return NextResponse.json(result);
+        } catch (error) {
+          console.error('Error applying pitch modification:', error);
+        }
+      }
+    }
+
+    // If not a direct pitch command, proceed with AI processing
     try {
       // Look for JSON blocks in the AI response
       const jsonMatch = aiMessage.match(/```json\n([\s\S]*?)\n```/);
@@ -256,4 +294,26 @@ function generateChangeSummary(original: USTXData, updated: USTXData) {
   });
 
   return changes;
+}
+
+function generatePitchDescription(modification: PitchModification, changes: any[]): string {
+  const changeCount = changes.filter(c => c.type === 'pitch').length;
+  
+  switch (modification.type) {
+    case 'shift':
+      const semitones = Math.round((modification.amount || 0) / 100);
+      return `Shifted pitch of ${changeCount} notes by ${semitones} semitones ${modification.verse ? `in verse ${modification.verse}` : ''}`.trim();
+    
+    case 'curve':
+      return `Added ${modification.pattern?.shape || 'linear'} pitch curve to ${changeCount} notes ${modification.verse ? `in verse ${modification.verse}` : ''}`.trim();
+    
+    case 'vibrato':
+      return `Added vibrato (${modification.amount}% depth) to ${changeCount} sustained notes ${modification.verse ? `in verse ${modification.verse}` : ''}`.trim();
+    
+    case 'transition':
+      return `Applied pitch transition across ${changeCount} notes ${modification.verse ? `in verse ${modification.verse}` : ''}`.trim();
+    
+    default:
+      return `Applied pitch modification to ${changeCount} notes`;
+  }
 }

@@ -1,14 +1,16 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
 import { motion, AnimatePresence } from 'framer-motion';
 import ChatInterface from '@/components/ChatInterface';
 import LyricsDisplay from '@/components/LyricsDisplay';
-import CopilotAudioPlayer from '@/components/CopilotAudioPlayer';
+import SimpleCopilotAudioPlayer, { SimpleCopilotAudioPlayerRef } from '@/components/SimpleCopilotAudioPlayer';
 import QualityModeIndicator from '@/components/QualityModeIndicator';
+import KaraokeVideoGenerator from '@/components/KaraokeVideoGenerator';
 import { USTXData, USTXNote, PhonemeTiming } from '@/types/openutau';
 import { getQualitySettings, getQualityIcon, getQualityColor, QUALITY_PRESETS } from '@/utils/qualitySettings';
+// Removed TemplatePreRenderer and PrerenderedLoader - only individual segment rendering when user clicks
 import yaml from 'js-yaml';
 
 export default function CopilotPage() {
@@ -30,42 +32,77 @@ export default function CopilotPage() {
     lineIndex: number;
   } | null>(null);
   const [qualityMode, setQualityMode] = useState<'preview' | 'standard' | 'high' | 'super'>('standard');
-  const [useGPU, setUseGPU] = useState<boolean>(false);
+  const [useGPU, setUseGPU] = useState<boolean>(false); // GPU toggle for faster verse rendering
   const [cachedVerseDetection, setCachedVerseDetection] = useState<any[] | null>(null);
+  const [isLoadingTemplate, setIsLoadingTemplate] = useState<boolean>(false);
+  const [hasTemplateLoaded, setHasTemplateLoaded] = useState<boolean>(false);
+  // Removed pre-rendering state - only individual segments render when user clicks
+  const [isPlayingFullSong, setIsPlayingFullSong] = useState<boolean>(false);
+  const [currentTemplateName, setCurrentTemplateName] = useState<string | null>(null);
   
   const router = useRouter();
   const searchParams = useSearchParams();
+  const audioPlayerRef = useRef<SimpleCopilotAudioPlayerRef>(null);
 
   // Load USTX data from query params or localStorage
   useEffect(() => {
     const loadInitialData = async () => {
       // Try to load from query params first
       const template = searchParams.get('template');
-      if (template === 'still_here' || template === 'still_here_original' || template === 'still_here_happy_verse1') {
+      if (template === 'still_here' || template === 'still_here_original' || template === 'still_here_simple' || template === 'working_script') {
         try {
           // Map old template name to new API
           const apiTemplateName = template === 'still_here' ? 'still_here_original' : template;
+          setCurrentTemplateName(apiTemplateName);
+          
+          // Clear any existing segment updates to reset to original song
+          console.log(`🧹 Clearing segment updates for fresh template load from URL: ${apiTemplateName}`);
+          try {
+            await fetch('/api/clear-segment-updates', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ templateName: apiTemplateName })
+            });
+            console.log(`✅ Segment updates cleared for ${apiTemplateName}`);
+          } catch (error) {
+            console.warn('Failed to clear segment updates:', error);
+          }
           
           const response = await fetch(`/api/templates?name=${apiTemplateName}`);
           if (response.ok) {
             const result = await response.json();
-            setUstxData(result.ustxData);
-            console.log(`📄 Loaded template from URL: ${result.template.displayName}`);
+            
+            // Load pre-cached verse detection if available
+            setIsLoadingTemplate(true);
+            if (result.cachedVerseDetection) {
+              // Set cached data FIRST, then ustxData to prevent race condition
+              setCachedVerseDetection(result.cachedVerseDetection.verses);
+              setUstxData(result.ustxData);
+              console.log(`📄 Loaded template from URL: ${result.template.displayName} with ${result.cachedVerseDetection.verses.length} pre-cached verses`);
+            } else {
+              setCachedVerseDetection(null);
+              setUstxData(result.ustxData);
+              console.log(`📄 Loaded template from URL: ${result.template.displayName} (no cache available)`);
+            }
+            setIsLoadingTemplate(false);
+            
+            // Pre-rendering disabled - SimpleCopilotAudioPlayer handles full song audio directly
+            // Individual segment rendering only happens when user clicks "Render" on specific verses
+            setHasTemplateLoaded(true);
           }
         } catch (error) {
           console.error('Error loading template:', error);
         }
       }
       
-      // Try to load from localStorage
-      const savedData = localStorage.getItem('copilot_ustx_data');
-      if (savedData && !ustxData) {
-        try {
-          const parsedData = JSON.parse(savedData);
-          setUstxData(parsedData);
-        } catch (error) {
-          console.error('Error parsing saved data:', error);
-        }
+      // Only load from localStorage if no template was specified
+      // This prevents loading old data when user wants a clean copilot page
+      if (!template) {
+        console.log('🔄 No template specified, starting with clean copilot page');
+        // Clear any existing data to ensure clean state
+        setUstxData(null);
+        setCachedVerseDetection(null);
+        setHasTemplateLoaded(false);
       }
     };
 
@@ -78,6 +115,7 @@ export default function CopilotPage() {
       localStorage.setItem('copilot_ustx_data', JSON.stringify(ustxData));
     }
   }, [ustxData]);
+
 
   // Detect verses once when USTX loads (cache the results to prevent re-detection)
   useEffect(() => {
@@ -109,11 +147,20 @@ export default function CopilotPage() {
       }
     };
 
-    // Only detect verses when USTX structure changes, not on every lyrics update
-    if (ustxData && !cachedVerseDetection) {
+    // Only detect verses when USTX comes from a template, not from localStorage
+    if (ustxData && !cachedVerseDetection && hasTemplateLoaded) {
+      console.log('⚠️  COPILOT: Template loaded but no cached verses found, running CLI detection...');
       detectAndCacheVerses();
+    } else if (ustxData && cachedVerseDetection) {
+      console.log('✅ COPILOT: Using cached verse detection - bypassing 20-second CLI process');
+    } else if (ustxData && !hasTemplateLoaded) {
+      console.log('🔄 COPILOT: USTX data loaded from localStorage, skipping CLI detection (no template loaded)');
     }
-  }, [ustxData, singerId, cachedVerseDetection]);
+  }, [ustxData, singerId, cachedVerseDetection, hasTemplateLoaded]);
+
+  // Pre-rendering functions removed - individual segments only render when user clicks "Render" button
+
+  // Timeline loading removed - SimpleCopilotAudioPlayer handles audio loading directly
 
   const handleMouseDown = (e: React.MouseEvent) => {
     setIsDragging(true);
@@ -191,18 +238,48 @@ export default function CopilotPage() {
   };
 
   const handleTemplateSelect = async (templateName: string) => {
-    if (templateName === 'still_here_original' || templateName === 'still_here_happy_verse1' || templateName === 'still_here') {
+    if (templateName === 'still_here_original' || templateName === 'still_here_simple' || templateName === 'working_script' || templateName === 'still_here') {
       try {
         // Map old template name to new API
         const apiTemplateName = templateName === 'still_here' ? 'still_here_original' : templateName;
+        setCurrentTemplateName(apiTemplateName);
+        
+        // Clear any existing segment updates to reset to original song
+        console.log(`🧹 Clearing segment updates for fresh template load: ${apiTemplateName}`);
+        try {
+          await fetch('/api/clear-segment-updates', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ templateName: apiTemplateName })
+          });
+          console.log(`✅ Segment updates cleared for ${apiTemplateName}`);
+        } catch (error) {
+          console.warn('Failed to clear segment updates:', error);
+        }
         
         const response = await fetch(`/api/templates?name=${apiTemplateName}`);
         if (response.ok) {
           const result = await response.json();
-          setUstxData(result.ustxData);
-          // Clear cached verse detection when loading new template (different song structure)
-          setCachedVerseDetection(null);
-          console.log(`📄 Loaded template: ${result.template.displayName} - ${result.template.description}`);
+          
+          // Load pre-cached verse detection if available
+          setIsLoadingTemplate(true);
+          if (result.cachedVerseDetection) {
+            // Set cached data FIRST, then ustxData to prevent race condition
+            setCachedVerseDetection(result.cachedVerseDetection.verses);
+            setUstxData(result.ustxData);
+            console.log(`📄 Loaded template: ${result.template.displayName} with ${result.cachedVerseDetection.verses.length} pre-cached verses`);
+          } else {
+            // Clear cached verse detection when loading new template (different song structure)
+            setCachedVerseDetection(null);
+            setUstxData(result.ustxData);
+            console.log(`📄 Loaded template: ${result.template.displayName} - ${result.template.description} (no cache available)`);
+          }
+          setIsLoadingTemplate(false);
+          setHasTemplateLoaded(true);
+          
+          // Pre-rendering disabled - SimpleCopilotAudioPlayer handles full song audio directly
+          // Individual segment rendering only happens when user clicks "Render" on specific verses
+          
           // Auto-render disabled for copilot mode - user can manually render if needed
           // autoRenderFullSong(result.ustxData);
         }
@@ -259,6 +336,16 @@ export default function CopilotPage() {
     }
   };
 
+  const handleSegmentComplete = async (lineIndex: number) => {
+    console.log(`🔄 Segment ${lineIndex} completed, refreshing full song audio...`);
+    try {
+      await audioPlayerRef.current?.refreshAudio(true); // Preserve position
+      console.log(`✅ Full song audio refreshed with new segment ${lineIndex}`);
+    } catch (error) {
+      console.error('Failed to refresh full song audio:', error);
+    }
+  };
+
   const handleSegmentRender = async (startNoteIndex: number, endNoteIndex: number, lineIndex: number) => {
     if (!ustxData) throw new Error('No USTX data available');
 
@@ -291,6 +378,13 @@ export default function CopilotPage() {
         setCurrentSegmentInfo({ startNoteIndex, endNoteIndex, lineIndex });
         setRenderingStatus(`✅ Line ${lineIndex + 1} rendered successfully!`);
         
+        // render-segment API already saves the segment update, just refresh the audio player
+        console.log(`🔄 Refreshing main audio player with updated verse ${lineIndex + 1}`);
+        if (audioPlayerRef.current) {
+          await audioPlayerRef.current.refreshAudio(true); // Preserve playback position
+          console.log(`✅ Main audio player refreshed`);
+        }
+        
         // Return the audio URL for the LyricsDisplay component to use
         return audioUrl;
       } else {
@@ -314,9 +408,40 @@ export default function CopilotPage() {
     setPlaybackMode('segment');
   };
 
-  const handleSegmentComplete = (lineIndex: number) => {
-    console.log(`✅ Segment ${lineIndex + 1} completed and saved`);
-    // Could trigger full song refresh here if needed
+  const updateFullSongSegment = async (audioBlob: Blob, verseNumber: number, startNoteIndex: number, endNoteIndex: number) => {
+    console.log(`🚀 DEBUG: updateFullSongSegment called! verse=${verseNumber}, template=${currentTemplateName}`);
+    if (!currentTemplateName) return;
+    
+    try {
+      console.log(`🔄 Updating full song with new segment for verse ${verseNumber}...`);
+      
+      const formData = new FormData();
+      formData.append('templateName', currentTemplateName);
+      formData.append('verseNumber', verseNumber.toString());
+      formData.append('startNoteIndex', startNoteIndex.toString());
+      formData.append('endNoteIndex', endNoteIndex.toString());
+      formData.append('audioData', audioBlob, `verse_${verseNumber}.wav`);
+      
+      const response = await fetch('/api/update-full-song-segment', {
+        method: 'POST',
+        body: formData,
+      });
+      
+      if (response.ok) {
+        const result = await response.json();
+        console.log(`✅ Full song updated with verse ${verseNumber}`);
+        
+        // Refresh the audio player to load the updated segment
+        if (audioPlayerRef.current) {
+          await audioPlayerRef.current.refreshAudio();
+          console.log('🔄 Refreshed full song audio player with updated segments');
+        }
+      } else {
+        console.error('Failed to update full song segment');
+      }
+    } catch (error) {
+      console.error('Error updating full song segment:', error);
+    }
   };
 
   return (
@@ -377,6 +502,43 @@ export default function CopilotPage() {
         </div>
 
         <div className="flex items-center space-x-4">
+          {/* Manual Full Song Update Button */}
+          <motion.button
+            whileHover={{ scale: 1.05 }}
+            whileTap={{ scale: 0.95 }}
+            onClick={async () => {
+              if (currentTemplateName && segmentAudio) {
+                setRenderingStatus('Updating full song...');
+                try {
+                  // Create blob from current segment audio
+                  const response = await fetch(segmentAudio);
+                  const audioBlob = await response.blob();
+                  const lineIndex = currentSegmentInfo?.lineIndex || 0;
+                  const startNoteIndex = currentSegmentInfo?.startNoteIndex || 0;
+                  const endNoteIndex = currentSegmentInfo?.endNoteIndex || 0;
+                  
+                  await updateFullSongSegment(audioBlob, lineIndex + 1, startNoteIndex, endNoteIndex);
+                  setRenderingStatus('Full song updated successfully!');
+                } catch (error) {
+                  console.error('Full song update failed:', error);
+                  setRenderingStatus('Full song update failed');
+                }
+                setTimeout(() => setRenderingStatus(''), 3000);
+              }
+            }}
+            disabled={!segmentAudio || !currentTemplateName}
+            className={`
+              px-3 py-2 rounded text-sm transition-colors
+              ${!segmentAudio || !currentTemplateName
+                ? 'bg-gray-600 text-gray-400 cursor-not-allowed'
+                : 'bg-green-600 hover:bg-green-700 text-white'
+              }
+            `}
+            title="Update full song with rendered verses"
+          >
+            🎵 Update Full Song
+          </motion.button>
+
           {/* Quality Mode Selector */}
           <div className="flex items-center space-x-2">
             <label className="text-sm text-gray-300">Quality:</label>
@@ -395,26 +557,35 @@ export default function CopilotPage() {
           </div>
 
           {/* GPU Toggle */}
-          <motion.div className="flex items-center space-x-2">
+          <motion.div 
+            whileHover={{ scale: 1.02 }}
+            className="flex items-center space-x-2"
+          >
             <label className="text-sm text-gray-300">GPU:</label>
             <motion.button
               onClick={() => setUseGPU(!useGPU)}
-              className={`relative w-12 h-6 rounded-full transition-all duration-300 ${
-                useGPU ? 'bg-gradient-to-r from-green-500 to-emerald-600' : 'bg-gray-600'
+              className={`relative w-12 h-6 rounded-full transition-all duration-300 focus:outline-none focus:ring-2 focus:ring-purple-500 ${
+                useGPU 
+                  ? 'bg-gradient-to-r from-green-500 to-emerald-600 shadow-lg shadow-green-500/30' 
+                  : 'bg-gray-600 hover:bg-gray-500'
               }`}
               whileHover={{ scale: 1.05 }}
               whileTap={{ scale: 0.95 }}
             >
               <motion.div
-                animate={{ x: useGPU ? 24 : 2 }}
+                animate={{
+                  x: useGPU ? 24 : 2,
+                }}
                 transition={{ type: "spring", stiffness: 500, damping: 30 }}
-                className={`absolute top-1 w-4 h-4 rounded-full ${
+                className={`absolute top-1 w-4 h-4 rounded-full shadow-md ${
                   useGPU ? 'bg-white' : 'bg-gray-300'
                 }`}
               />
             </motion.button>
+            <span className={`text-xs ${useGPU ? 'text-green-400' : 'text-gray-400'}`}>
+              {useGPU ? '⚡ Fast' : '🖥️ Stable'}
+            </span>
           </motion.div>
-
           <div className="flex items-center space-x-2">
             <label className="text-sm text-gray-300">Singer:</label>
             <input
@@ -459,6 +630,7 @@ export default function CopilotPage() {
             onUSTXUpdate={handleUSTXUpdate}
             onTemplateSelect={handleTemplateSelect}
             cachedVerseDetection={cachedVerseDetection || undefined}
+            isLoadingTemplate={isLoadingTemplate}
           />
         </motion.div>
 
@@ -495,6 +667,7 @@ export default function CopilotPage() {
             onSegmentPlay={handleSegmentPlay}
             onSegmentComplete={handleSegmentComplete}
             cachedVerseDetection={cachedVerseDetection || undefined}
+            isLoadingTemplate={isLoadingTemplate}
             useGPU={useGPU}
           />
         </motion.div>
@@ -506,14 +679,10 @@ export default function CopilotPage() {
         animate={{ y: 0, opacity: 1 }}
         transition={{ delay: 0.3, duration: 0.4 }}
       >
-        <CopilotAudioPlayer
-          ustxData={ustxData || undefined}
-          singerId={singerId}
-          onTimeUpdate={setCurrentTime}
-          onPlayStateChange={setIsPlaying}
-          onPlaybackModeChange={setPlaybackMode}
-          playbackMode={playbackMode}
-          segmentAudio={segmentAudio}
+        <SimpleCopilotAudioPlayer
+          ref={audioPlayerRef}
+          templateName={currentTemplateName || undefined}
+          hasTemplate={hasTemplateLoaded && !!currentTemplateName}
         />
       </motion.div>
 
@@ -545,6 +714,7 @@ export default function CopilotPage() {
         >
           {leftPanelWidth > 50 ? 'Focus Lyrics' : 'Focus Chat'}
         </motion.button>
+        
       </motion.div>
 
       {/* Drag overlay */}

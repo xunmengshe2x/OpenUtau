@@ -7,10 +7,10 @@ import { join } from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import { segmentCache } from '@/utils/segmentCache';
 
-// Modal configuration - Dual endpoint support
+// Modal configuration - Dynamic endpoint selection based on useGPU
 const MODAL_CPU_URL = 'https://wwatashi84--openutau-voice-synthesis-render-segment-cpu.modal.run';
 const MODAL_GPU_URL = 'https://wwatashi84--openutau-voice-synthesis-render-segment.modal.run';
-const USE_MODAL = true; // Set to false to use local CLI
+const USE_MODAL = false; // Set to false to use local CLI
 
 interface SegmentRenderRequest {
   ustxData: USTXData;
@@ -18,7 +18,7 @@ interface SegmentRenderRequest {
   startNoteIndex: number;
   endNoteIndex: number;
   lineIndex?: number;
-  useGPU?: boolean;
+  useGPU?: boolean; // GPU toggle for faster rendering
   qualitySettings?: {
     diffSingerDepth: number;
     diffSingerSteps: number;
@@ -30,7 +30,7 @@ interface SegmentRenderRequest {
 export async function POST(request: NextRequest) {
   try {
     const requestBody = await request.json();
-    const { ustxData, singerId, startNoteIndex, endNoteIndex, lineIndex, useGPU, qualitySettings }: SegmentRenderRequest = requestBody;
+    const { ustxData, singerId, startNoteIndex, endNoteIndex, lineIndex, useGPU = false, qualitySettings }: SegmentRenderRequest = requestBody;
 
     if (!ustxData || !singerId || startNoteIndex == null || endNoteIndex == null) {
       return NextResponse.json({ error: 'Missing required parameters' }, { status: 400 });
@@ -144,33 +144,70 @@ export async function POST(request: NextRequest) {
     // Step 4: Try Modal first, fallback to local CLI if needed
     if (USE_MODAL) {
       try {
+        // Select endpoint based on GPU preference
         const modalUrl = useGPU ? MODAL_GPU_URL : MODAL_CPU_URL;
-        const endpointType = useGPU ? 'GPU' : '8-core CPU';
+        const endpointType = useGPU ? 'GPU (with CPU fallback)' : '8-core CPU';
+        
         console.log(`🚀 Using Modal ${endpointType} for segment rendering...`);
         console.log(`🎯 DEBUG: Sending to Modal - phraseNumbers=${JSON.stringify(targetPhraseNumbers)}`);
+        
+        // Create payload and log it for debugging
+        const requestPayload = useGPU ? {
+          // GPU endpoint format - EXACT MATCH to working test script
+          ustxData,
+          singerId,
+          phraseNumbers: targetPhraseNumbers[0] || 1,
+          useGPU: true,
+          qualitySettings: qualitySettings || {
+            diffSingerDepth: 1000,
+            diffSingerSteps: 1000,
+            diffSingerStepsPitch: 5,
+            diffSingerStepsVariance: 4
+          }
+        } : {
+          // CPU endpoint format (simpler, just phraseNumbers)
+          ustxData,
+          singerId,
+          phraseNumbers: targetPhraseNumbers[0] || 1,
+          qualitySettings: qualitySettings || {
+            diffSingerDepth: 1000,
+            diffSingerSteps: 1000,
+            diffSingerStepsPitch: 5,
+            diffSingerStepsVariance: 4
+          }
+        };
+        
+        console.log(`🎯 DEBUG: useGPU=${useGPU}, modalUrl=${modalUrl}`);
+        console.log(`🎯 DEBUG: targetPhraseNumbers array:`, targetPhraseNumbers);
+        console.log(`🎯 DEBUG: targetPhraseNumbers[0]:`, targetPhraseNumbers[0]);
+        console.log(`🎯 DEBUG: Request payload keys: ${Object.keys(requestPayload).join(', ')}`);
+        console.log(`🎯 DEBUG: phraseNumbers value: ${requestPayload.phraseNumbers} (type: ${typeof requestPayload.phraseNumbers})`);
+        console.log(`🎯 DEBUG: qualitySettings:`, JSON.stringify(requestPayload.qualitySettings));
+        if (useGPU) {
+          console.log(`🎯 DEBUG: GPU payload - minimal format like test script`);
+        } else {
+          console.log(`🎯 DEBUG: CPU payload format`);
+        }
         
         const modalResponse = await fetch(modalUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify({
-            ustxData,
-            singerId,
-            phraseNumbers: targetPhraseNumbers[0] || 1, // 8-core CPU endpoint expects single phrase number
-            qualitySettings: qualitySettings || {
-              diffSingerDepth: 1000,
-              diffSingerSteps: 1000,
-              diffSingerStepsPitch: 5,
-              diffSingerStepsVariance: 4
-            }
-          }),
+          body: JSON.stringify(requestPayload),
         });
 
         const modalResult = await modalResponse.json();
         
+        console.log(`🎯 DEBUG: Modal response keys: ${Object.keys(modalResult).join(', ')}`);
+        console.log(`🎯 DEBUG: Modal success: ${modalResult.success}`);
+        console.log(`🎯 DEBUG: Modal used_cpu_fallback: ${modalResult.used_cpu_fallback}`);
+        console.log(`🎯 DEBUG: Modal cpu_cores: ${modalResult.cpu_cores}`);
+        console.log(`🎯 DEBUG: Modal audio size: ${modalResult.size}`);
+        
         if (modalResult.success && modalResult.audio) {
-          console.log(`✅ Modal ${endpointType} segment rendering successful!`);
+          const fallbackMsg = modalResult.used_cpu_fallback ? ' (⚠️ used CPU fallback)' : '';
+          console.log(`✅ Modal ${endpointType} segment rendering successful!${fallbackMsg}`);
           
           // Decode base64 audio
           const audioBuffer = Buffer.from(modalResult.audio, 'base64');
@@ -196,15 +233,15 @@ export async function POST(request: NextRequest) {
               'Content-Length': audioBuffer.length.toString(),
               'Cache-Control': 'public, max-age=86400',
               'X-Segment-Info': JSON.stringify({
-                method: `modal-${useGPU ? 'gpu' : '8core-cpu'}-render`,
+                method: useGPU ? 'modal-gpu-render' : 'modal-8core-cpu-render',
                 phrasesRendered: targetPhraseNumbers,
                 totalPhrases: phrasesData.phrases.length,
                 lineIndex,
                 targetNotes: `${startNoteIndex}-${endNoteIndex}`,
                 cached: false,
                 modalRendered: true,
-                endpoint: useGPU ? 'gpu' : '8-core-cpu',
-                useGPU
+                endpoint: useGPU ? 'gpu-with-fallback' : '8-core-cpu',
+                usedCpuFallback: modalResult.used_cpu_fallback || false
               })
             },
           });
@@ -231,10 +268,11 @@ export async function POST(request: NextRequest) {
       // Write the USTX file
       await writeFile(ustxPath, JSON.stringify(ustxData, null, 2));
 
+      // Build render command with reset timings and preserve silence
+      let renderCommand = `rm -rf /home/codespace/.cache/OpenUtau/* && dotnet run --project OpenUtau.Cli -- ${ustxPath} ${singerId} ${outputJson} ${outputWav} --reset-timings --preserve-silence-timing --render-phrases ${targetPhraseNumbers.join(',')}`;
+      
       // Avoid --trim-leading-silence for phrases that might have significant leading silence
       const skipTrimSilence = targetPhraseNumbers.some(p => p >= 4); // Skip for phrase 4 and later
-      let renderCommand = `rm -rf /home/codespace/.cache/OpenUtau/* && dotnet run --project OpenUtau.Cli -- ${ustxPath} ${singerId} ${outputJson} ${outputWav} --reset-timings --phoneme-override dream:0:d:jh --render-phrases ${targetPhraseNumbers.join(',')}`;
-      
       if (!skipTrimSilence) {
         renderCommand += ` --trim-leading-silence`;
       } else {
@@ -248,7 +286,7 @@ export async function POST(request: NextRequest) {
         renderCommand += ` --diffsinger-steps-variance ${qualitySettings.diffSingerStepsVariance}`;
       }
 
-      console.log('Rendering specific phrases:', renderCommand);
+      console.log('🎵 Rendering specific phrases with local CLI:', renderCommand);
 
       const renderProcess = spawn('bash', ['-c', renderCommand], {
         cwd: '/workspaces/OpenUtau'
@@ -277,16 +315,12 @@ export async function POST(request: NextRequest) {
             .trim();
           
           console.log(`[RENDER-SEGMENT] Filtered stderr: "${filteredStderr}"`);
-          console.log(`[RENDER-SEGMENT] Raw stderr (last 1000 chars): "${stderr.slice(-1000)}"`);
-          console.log(`[RENDER-SEGMENT] Stdout (last 1000 chars): "${stdout.slice(-1000)}"`);
-          console.log(`[RENDER-SEGMENT] Command was: ${renderCommand}`);
           
           if (code === 0) {
             console.log(`[RENDER-SEGMENT] ✅ Success - resolving`);
             resolve();
           } else {
             console.log(`[RENDER-SEGMENT] ❌ Failed with code ${code}`);
-            // Provide more detailed error information
             const debugInfo = `Exit code: ${code}\nFiltered stderr: ${filteredStderr}\nRaw stderr: ${stderr.slice(-500)}\nStdout: ${stdout.slice(-500)}`;
             const errorMessage = filteredStderr || `Process exited with code ${code}`;
             reject(new Error(`Phrase rendering failed: ${errorMessage}\n\nDebug info:\n${debugInfo}`));
@@ -324,15 +358,17 @@ export async function POST(request: NextRequest) {
         headers: {
           'Content-Type': 'audio/wav',
           'Content-Length': audioBuffer.length.toString(),
-          'Cache-Control': 'public, max-age=86400', // Cache for 24 hours since we have smart cache invalidation
+          'Cache-Control': 'public, max-age=86400',
           'X-Segment-Info': JSON.stringify({
-            method: 'targeted-phrase-rendering',
+            method: 'local-cli-phrase-rendering',
             phrasesRendered: targetPhraseNumbers,
             totalPhrases: phrasesData.phrases.length,
             lineIndex,
             targetNotes: `${startNoteIndex}-${endNoteIndex}`,
             cached: false,
-            freshlyRendered: true
+            freshlyRendered: true,
+            resetTimings: true,
+            preserveSilence: true
           })
         },
       });
@@ -391,7 +427,6 @@ async function saveSegmentForFullSongIntegration(
     console.log(`💾 [SEGMENT-SAVE] LineIndex ${lineIndex} -> Verse ${verseNumber}`);
     
     // Create the segment updates directory
-    // Fix: Use the same path as openutau-mix API uses
     const segmentDir = join('/workspaces/OpenUtau', '.segment_updates', templateName);
     const segmentFile = join(segmentDir, `verse_${verseNumber}.wav`);
     console.log(`💾 [SEGMENT-SAVE] Segment directory: ${segmentDir}`);
@@ -405,11 +440,6 @@ async function saveSegmentForFullSongIntegration(
       console.log(`💾 [SEGMENT-SAVE] Directory created successfully`);
     } else {
       console.log(`💾 [SEGMENT-SAVE] Directory already exists: ${segmentDir}`);
-    }
-    
-    // Verify directory was created
-    if (!fs.existsSync(segmentDir)) {
-      throw new Error(`Failed to create segment directory: ${segmentDir}`);
     }
     
     // Save the rendered segment
@@ -461,30 +491,14 @@ async function saveSegmentForFullSongIntegration(
     };
     
     console.log(`💾 [SEGMENT-SAVE] Adding update for key: ${updateKey}`);
-    console.log(`💾 [SEGMENT-SAVE] Update data:`, JSON.stringify(updates[updateKey], null, 2));
     
     const updatesJson = JSON.stringify(updates, null, 2);
     writeFileSync(metadataFile, updatesJson);
-    
-    // Verify metadata file was written
-    if (!existsSync(metadataFile)) {
-      throw new Error(`Failed to write metadata file: ${metadataFile}`);
-    }
-    
-    const metadataStats = fs.statSync(metadataFile);
-    console.log(`💾 [SEGMENT-SAVE] ✅ Metadata file written: ${metadataFile} (${metadataStats.size} bytes)`);
-    
-    // Final verification
-    console.log(`💾 [SEGMENT-SAVE] Final verification:`);
-    console.log(`💾 [SEGMENT-SAVE] - Segment file exists: ${existsSync(segmentFile)}`);
-    console.log(`💾 [SEGMENT-SAVE] - Metadata file exists: ${existsSync(metadataFile)}`);
-    console.log(`💾 [SEGMENT-SAVE] - Updates in metadata: ${Object.keys(updates).join(', ')}`);
     
     console.log(`💾 [SEGMENT-SAVE] ✅ SUCCESS: Segment integration saved: verse ${verseNumber} for template ${templateName}`);
     
   } catch (error) {
     console.error('💾 [SEGMENT-SAVE] ❌ ERROR saving segment for full song integration:', error);
-    console.error('💾 [SEGMENT-SAVE] ❌ Error stack:', error instanceof Error ? error.stack : 'No stack available');
-    // Don't throw - this shouldn't break the main render flow, but log the full error details
+    // Don't throw - this shouldn't break the main render flow
   }
 }

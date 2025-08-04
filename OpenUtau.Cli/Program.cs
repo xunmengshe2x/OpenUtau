@@ -5,6 +5,7 @@ using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
+using System.Threading.Tasks;
 using OpenUtau.Api;
 using OpenUtau.Core;
 using OpenUtau.Core.Enunu;
@@ -170,11 +171,16 @@ namespace OpenUtau.Cli {
             }
 
             // Initialize singer and tools
+            Console.Error.WriteLine("[DEBUG] Initializing SingerManager...");
             SingerManager.Inst.Initialize();
+            Console.Error.WriteLine("[DEBUG] Initializing ToolsManager...");
             ToolsManager.Inst.Initialize();
+            
             // Register built-in & external phonemizer plugins and start the phonemizer runner
+            Console.Error.WriteLine("[DEBUG] Searching plugins...");
             DocManager.Inst.SearchAllPlugins();
             DocManager.Inst.SearchAllLegacyPlugins();
+            Console.Error.WriteLine("[DEBUG] Initializing DocManager...");
             DocManager.Inst.Initialize(Thread.CurrentThread, TaskScheduler.Current);
 
             UProject project = null;
@@ -257,6 +263,36 @@ namespace OpenUtau.Cli {
                 return 1;
             }
             Console.Error.WriteLine($"[DEBUG] Singer loaded: Id='{singer.Id}', Name='{singer.Name}', Type='{singer.SingerType}', DefaultPhonemizer='{singer.DefaultPhonemizer}', Location='{singer.Location}'");
+            
+            // Debug environment info for Modal troubleshooting  
+            Console.Error.WriteLine($"[DEBUG] Environment info:");
+            Console.Error.WriteLine($"[DEBUG]   OS: {Environment.OSVersion}");
+            Console.Error.WriteLine($"[DEBUG]   ProcessorCount: {Environment.ProcessorCount}");
+            Console.Error.WriteLine($"[DEBUG]   WorkingSet: {Environment.WorkingSet / 1024 / 1024} MB");
+            Console.Error.WriteLine($"[DEBUG]   Is64BitProcess: {Environment.Is64BitProcess}");
+            Console.Error.WriteLine($"[DEBUG]   CurrentDirectory: {Environment.CurrentDirectory}");
+            Console.Error.WriteLine($"[DEBUG]   Audio system available: {System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Linux)}");
+            
+            // Check ONNX Runtime configuration for DiffSinger
+            Console.Error.WriteLine($"[DEBUG] ONNX Runtime Environment:");
+            Console.Error.WriteLine($"[DEBUG]   Available ONNX runners: {string.Join(", ", OpenUtau.Core.Onnx.getRunnerOptions())}");
+            Console.Error.WriteLine($"[DEBUG]   Current ONNX runner setting: {OpenUtau.Core.Util.Preferences.Default.OnnxRunner ?? "null (will default to CPU)"}");
+            Console.Error.WriteLine($"[DEBUG]   ONNX GPU setting: {OpenUtau.Core.Util.Preferences.Default.OnnxGpu}");
+            
+            // Check if DiffSinger model files exist
+            var singerPath = singer.Location;
+            Console.Error.WriteLine($"[DEBUG] Singer location: {singerPath}");
+            if (Directory.Exists(singerPath)) {
+                var modelFiles = Directory.GetFiles(singerPath, "*.onnx", SearchOption.AllDirectories);
+                Console.Error.WriteLine($"[DEBUG] Found {modelFiles.Length} .onnx model files:");
+                foreach (var model in modelFiles.Take(5)) {
+                    var fileInfo = new FileInfo(model);
+                    Console.Error.WriteLine($"[DEBUG]   - {Path.GetFileName(model)} ({fileInfo.Length / 1024 / 1024} MB)");
+                }
+                if (modelFiles.Length > 5) {
+                    Console.Error.WriteLine($"[DEBUG]   ... and {modelFiles.Length - 5} more");
+                }
+            }
 
 
             var timeAxis = project.timeAxis;
@@ -553,16 +589,38 @@ namespace OpenUtau.Cli {
             }
             Console.Error.WriteLine($"[DEBUG] Skipping audio render block? outputWav.IsNullOrEmpty={string.IsNullOrEmpty(outputWav)}");
             if (!string.IsNullOrEmpty(outputWav)) {
+            Console.Error.WriteLine("[DEBUG] Starting audio rendering process");
             Console.Error.WriteLine("[DEBUG] Populating render phrases for audio rendering");
             foreach (var part in project.parts.OfType<UVoicePart>()) {
                 var track = project.tracks[part.trackNo];
-                // Ensure the renderer settings have been initialized (as GUI does on load)
-                track.RendererSettings.Validate(track);
-                part.renderPhrases = RenderPhrase
-                    .FromPart(project, track, part)
-                    .ToList();
-                Console.Error.WriteLine(
-                    $"[DEBUG] Part '{part.DisplayName}' → {part.renderPhrases.Count} render phrase(s)");
+                Console.Error.WriteLine($"[DEBUG] Processing part '{part.DisplayName}' with {part.phonemes.Count} phonemes");
+                
+                try {
+                    // Ensure the renderer settings have been initialized (as GUI does on load)
+                    Console.Error.WriteLine("[DEBUG] Validating renderer settings...");
+                    track.RendererSettings.Validate(track);
+                    Console.Error.WriteLine("[DEBUG] Renderer settings validated successfully");
+                    
+                    Console.Error.WriteLine("[DEBUG] Generating render phrases...");
+                    Console.Error.WriteLine($"[DEBUG] About to call RenderPhrase.FromPart for part with {part.phonemes.Count} phonemes");
+                    
+                    // Add timeout mechanism to prevent infinite hangs
+                    var renderTask = Task.Run(() => {
+                        return RenderPhrase.FromPart(project, track, part).ToList();
+                    });
+                    
+                    if (renderTask.Wait(TimeSpan.FromMinutes(2))) {
+                        part.renderPhrases = renderTask.Result;
+                        Console.Error.WriteLine($"[DEBUG] Part '{part.DisplayName}' → {part.renderPhrases.Count} render phrase(s)");
+                    } else {
+                        Console.Error.WriteLine($"[ERROR] RenderPhrase.FromPart timed out after 2 minutes for part '{part.DisplayName}'");
+                        return 1;
+                    }
+                } catch (Exception ex) {
+                    Console.Error.WriteLine($"[ERROR] Failed to generate render phrases for part '{part.DisplayName}': {ex.Message}");
+                    Console.Error.WriteLine($"[ERROR] Stack trace: {ex.StackTrace}");
+                    return 1;
+                }
                 
                 // Debug: check for SP/AP phonemes in render phrases
                 foreach (var phrase in part.renderPhrases) {
@@ -628,7 +686,10 @@ namespace OpenUtau.Cli {
                     Console.Error.WriteLine($"[DEBUG] Rendering specific phrases: {string.Join(", ", phrasesToRender.Select(i => i + 1))}");
                 }
                 
-                var renderer = Renderers.CreateRenderer(Renderers.GetDefaultRenderer(singer.SingerType));
+                var defaultRendererType = Renderers.GetDefaultRenderer(singer.SingerType);
+                Console.Error.WriteLine($"[DEBUG] Default renderer for singer type '{singer.SingerType}': {defaultRendererType}");
+                var renderer = Renderers.CreateRenderer(defaultRendererType);
+                Console.Error.WriteLine($"[DEBUG] Created renderer: {renderer.GetType().FullName}");
                 var samples = new List<float>();
                 double lastPhraseEndMs = 0;
                 double firstPhraseStartMs = -1; // Track first phrase timing for trimming
@@ -705,6 +766,7 @@ namespace OpenUtau.Cli {
                     
                     RenderResult res;
                     try {
+                        Console.Error.WriteLine($"[DEBUG]   Starting renderer.Render() call for phrase {i + 1}...");
                         var renderTask = renderer.Render(
                             phrase,
                             new Progress(allPhrases.Count),
@@ -713,9 +775,11 @@ namespace OpenUtau.Cli {
                             false
                         );
                         
+                        Console.Error.WriteLine($"[DEBUG]   Render task created, waiting for completion...");
                         // Wait for either the render to complete or timeout
                         if (renderTask.Wait(TimeSpan.FromMinutes(2))) {
                             res = renderTask.Result;
+                            Console.Error.WriteLine($"[DEBUG]   Render completed successfully for phrase {i + 1}");
                         } else {
                             Console.Error.WriteLine($"[ERROR] Phrase {i + 1} rendering timed out after 2 minutes - skipping");
                             cancellationTokenSource.Cancel();
@@ -723,6 +787,7 @@ namespace OpenUtau.Cli {
                         }
                     } catch (Exception ex) {
                         Console.Error.WriteLine($"[ERROR] Phrase {i + 1} rendering failed: {ex.Message}");
+                        Console.Error.WriteLine($"[ERROR] Exception details: {ex}");
                         continue; // Skip this phrase and continue with the next
                     }
                     Console.Error.WriteLine(

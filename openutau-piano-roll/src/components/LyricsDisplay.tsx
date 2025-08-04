@@ -4,6 +4,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { USTXData, USTXNote, PhonemeTiming, DetailedPhonemeTiming } from '@/types/openutau';
 import { USTXLyricsManager } from '@/utils/ustxLyricsUtils';
+import { FullSongPlaybackManager } from '@/utils/fullSongPlayback';
 
 interface LyricsLine {
   notes: USTXNote[];
@@ -29,9 +30,11 @@ interface LyricsDisplayProps {
   onLyricEdit?: (noteIndex: number, newLyric: string) => void;
   onSegmentRender?: (startNoteIndex: number, endNoteIndex: number, lineIndex: number) => void;
   onSegmentPlay?: (audioUrl: string, lineIndex: number) => void;
-  onSegmentComplete?: (lineIndex: number) => void;
+  onSegmentComplete?: (lineIndex: number) => void; // Called when segment is successfully rendered and saved
   cachedVerseDetection?: any[];
-  useGPU?: boolean;
+  isLoadingTemplate?: boolean;
+  preRenderedSegments?: Map<number, string>;
+  useGPU?: boolean; // GPU toggle for faster rendering
 }
 
 const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
@@ -47,6 +50,8 @@ const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
   onSegmentPlay,
   onSegmentComplete,
   cachedVerseDetection,
+  isLoadingTemplate,
+  preRenderedSegments,
   useGPU = false
 }) => {
   const [lyricsLines, setLyricsLines] = useState<LyricsLine[]>([]);
@@ -58,6 +63,9 @@ const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
   const [renderingLines, setRenderingLines] = useState<Set<number>>(new Set());
   const [renderStatus, setRenderStatus] = useState<string>('');
   const [currentAudio, setCurrentAudio] = useState<HTMLAudioElement | null>(null);
+  const [fullSongPlayer, setFullSongPlayer] = useState<FullSongPlaybackManager | null>(null);
+  const [isPlayingFullSong, setIsPlayingFullSong] = useState<boolean>(false);
+  const [fullSongProgress, setFullSongProgress] = useState<{ currentTimeMs: number; currentSegment: any | null }>({ currentTimeMs: 0, currentSegment: null });
   const containerRef = useRef<HTMLDivElement>(null);
 
   // Process USTX data into lyrics lines using DiffSinger-style phoneme processing
@@ -96,10 +104,17 @@ const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
 
     const processVerses = async () => {
       try {
+        console.log('LYRICS DISPLAY: processVerses called with:', {
+          ustxDataExists: !!ustxData,
+          cachedVerseDetectionExists: !!cachedVerseDetection,
+          cachedVerseDetectionLength: cachedVerseDetection?.length || 0,
+          ustxName: ustxData?.name || 'unnamed'
+        });
+
         // Use cached verse detection if available to prevent re-detection corruption
         if (cachedVerseDetection && cachedVerseDetection.length > 0) {
-          console.log('LYRICS DISPLAY: Using cached verse detection (prevent re-detection corruption)');
-          console.log('LYRICS DISPLAY: Cached verses:', cachedVerseDetection.map(v => `${v.verseNumber}: "${v.lyrics}"`));
+          console.log('✅ LYRICS DISPLAY: Using cached verse detection (prevent re-detection corruption)');
+          console.log('LYRICS DISPLAY: Cached verses:', cachedVerseDetection.map(v => `${v.verseNumber}: "${v.lyrics?.slice(0, 30)}..."`));
           
           // Use cached boundaries but extract current lyrics from USTX
           const updatedVerses = await updateVersesWithCurrentLyrics(cachedVerseDetection);
@@ -107,8 +122,20 @@ const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
           return;
         }
         
-        // If no cached data, detect verses (but this should be rare in copilot mode)
-        console.log('LYRICS DISPLAY: No cached data available, detecting verses...');
+        // IMPORTANT: Don't run CLI detection while template is loading
+        if (isLoadingTemplate) {
+          console.log('⏳ LYRICS DISPLAY: Template is loading, waiting...');
+          return; // Exit early, wait for template loading to complete
+        }
+        
+        // Don't run CLI detection immediately if we expect cached data
+        if (ustxData && cachedVerseDetection === null) {
+          console.log('⏳ LYRICS DISPLAY: No cached verse detection yet, waiting for it to load...');
+          return; // Exit early, wait for cachedVerseDetection to be set
+        }
+        
+        // If no cached data after waiting, detect verses (should be rare in copilot mode)
+        console.log('⚠️  LYRICS DISPLAY: No cached data available after waiting, detecting verses...');
         const lyricsManager = new USTXLyricsManager(ustxData, phonemeData);
         
         // Try CLI-based phrase detection first (most accurate)
@@ -183,7 +210,42 @@ const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
     };
 
     processVerses();
-  }, [ustxData, phonemeData, cachedVerseDetection]);
+  }, [ustxData, phonemeData, cachedVerseDetection, isLoadingTemplate]);
+
+  // Initialize full song player
+  useEffect(() => {
+    const player = new FullSongPlaybackManager();
+    setFullSongPlayer(player);
+    
+    return () => {
+      player.dispose();
+    };
+  }, []);
+
+  // Initialize with pre-rendered segments
+  useEffect(() => {
+    if (preRenderedSegments && preRenderedSegments.size > 0) {
+      console.log(`🎬 Loading ${preRenderedSegments.size} pre-rendered segments`);
+      setRenderedAudioUrls(new Map(preRenderedSegments));
+    }
+  }, [preRenderedSegments]);
+
+  // Update full song timeline when rendered segments change
+  useEffect(() => {
+    if (fullSongPlayer && lyricsLines.length > 0) {
+      fullSongPlayer.buildTimeline(renderedAudioUrls, lyricsLines, 500);
+    }
+  }, [fullSongPlayer, renderedAudioUrls, lyricsLines]);
+
+  // Cleanup audio when component unmounts
+  useEffect(() => {
+    return () => {
+      if (currentAudio) {
+        currentAudio.pause();
+        currentAudio.currentTime = 0;
+      }
+    };
+  }, [currentAudio]);
 
   // Update highlighted note based on current playback time
   useEffect(() => {
@@ -286,45 +348,116 @@ const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
 
   const handleLineRender = async (lineIndex: number) => {
     const line = lyricsLines[lineIndex];
-    if (!line || !onSegmentRender) return;
+    if (!line || !ustxData) return;
 
-    // Add to rendering set to show loading state
-    setRenderingLines(prev => new Set(prev).add(lineIndex));
-    setRenderStatus(`Rendering verse ${lineIndex + 1}...`);
+    // Check if this line is already rendering
+    if (renderingLines.has(lineIndex)) {
+      console.log(`Line ${lineIndex} is already rendering`);
+      return;
+    }
 
-    try {
-      // Use the original startNoteIndex and endNoteIndex from CLI phrase detection
-      if (line.startNoteIndex !== undefined && line.endNoteIndex !== undefined) {
-        const audioUrl = await onSegmentRender(line.startNoteIndex, line.endNoteIndex, lineIndex);
-        
-        // Store the rendered audio URL
-        if (audioUrl) {
-          addRenderedSegment(lineIndex, audioUrl);
+    // Use the original startNoteIndex and endNoteIndex from CLI phrase detection
+    // These should be stored in the verse object when we created the line
+    if (line.startNoteIndex !== undefined && line.endNoteIndex !== undefined) {
+      try {
+        // Mark line as rendering
+        setRenderingLines(prev => new Set(prev).add(lineIndex));
+        setRenderStatus(`Rendering verse ${lineIndex + 1}...`);
+        console.log(`🎵 Starting render for line ${lineIndex}`);
+
+        // Render the segment and get audio URL
+        const response = await fetch('/api/render-segment', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            ustxData,
+            singerId: 'fem_1_ln', // TODO: Get from props
+            startNoteIndex: line.startNoteIndex,
+            endNoteIndex: line.endNoteIndex,
+            lineIndex,
+            qualitySettings: {
+              diffSingerDepth: 1000,
+              diffSingerSteps: 1000,
+              diffSingerStepsPitch: 5,
+              diffSingerStepsVariance: 4
+            }, // Explicit quality settings for GPU compatibility
+            useGPU // Pass GPU preference to API
+          }),
+        });
+
+        if (response.ok) {
+          const audioBlob = await response.blob();
+          const audioUrl = URL.createObjectURL(audioBlob);
+          
+          // Store the rendered audio URL
+          setRenderedAudioUrls(prev => new Map(prev.set(lineIndex, audioUrl)));
+          
+          // Hot-swap: Update full song player with new segment
+          if (fullSongPlayer) {
+            console.log(`🔄 Hot-swapping segment ${lineIndex} in full song`);
+            fullSongPlayer.updateSegment(lineIndex, audioUrl);
+          }
+          
+          // Check response headers for cache info
+          const segmentInfo = response.headers.get('X-Segment-Info');
+          let cacheStatus = '';
+          if (segmentInfo) {
+            try {
+              const info = JSON.parse(segmentInfo);
+              cacheStatus = info.cached ? ' (cached)' : ' (fresh render)';
+            } catch (e) {
+              // Ignore parsing errors
+            }
+          }
+          
+          setRenderStatus(`✅ Verse ${lineIndex + 1} rendered successfully${cacheStatus}`);
+          console.log(`✅ Render completed for line ${lineIndex}`);
+          
+          // Notify parent that segment is complete (triggers full song refresh)
+          onSegmentComplete?.(lineIndex);
+          
+          // Also call the original render handler for compatibility
+          onSegmentRender?.(line.startNoteIndex, line.endNoteIndex, lineIndex);
+        } else {
+          setRenderStatus(`❌ Failed to render verse ${lineIndex + 1}`);
+          console.error(`❌ Render failed for line ${lineIndex}: ${response.status}`);
         }
-        
-        // Call completion callback
-        if (onSegmentComplete) {
-          onSegmentComplete(lineIndex);
+      } catch (error) {
+        console.error('Error rendering segment:', error);
+        setRenderStatus(`❌ Error rendering verse ${lineIndex + 1}`);
+        // Fallback to original render handler
+        if (onSegmentRender) {
+          onSegmentRender(line.startNoteIndex, line.endNoteIndex, lineIndex);
         }
+      } finally {
+        // Remove from rendering set
+        setRenderingLines(prev => {
+          const newSet = new Set(prev);
+          newSet.delete(lineIndex);
+          return newSet;
+        });
         
-        setRenderStatus(`✅ Verse ${lineIndex + 1} rendered successfully!`);
-        setTimeout(() => setRenderStatus(''), 3000);
+        // Clear status after a delay
+        setTimeout(() => {
+          setRenderStatus('');
+        }, 3000);
       }
-    } catch (error) {
-      console.error('Render error:', error);
-      setRenderStatus(`❌ Failed to render verse ${lineIndex + 1}`);
-      setTimeout(() => setRenderStatus(''), 5000);
-    } finally {
-      // Remove from rendering set
-      setRenderingLines(prev => {
-        const newSet = new Set(prev);
-        newSet.delete(lineIndex);
-        return newSet;
-      });
     }
   };
 
+
   const handleLinePlay = (lineIndex: number) => {
+    // If this line is already playing, stop it
+    if (isPlayingLine === lineIndex && currentAudio) {
+      currentAudio.pause();
+      currentAudio.currentTime = 0;
+      setCurrentAudio(null);
+      setIsPlayingLine(-1);
+      return;
+    }
+
     const audioUrl = renderedAudioUrls.get(lineIndex);
     if (!audioUrl) return;
 
@@ -334,23 +467,60 @@ const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
       currentAudio.currentTime = 0;
     }
 
-    // Create new audio element
+    // Create and play new audio element
     const audio = new Audio(audioUrl);
-    audio.onplay = () => setIsPlayingLine(lineIndex);
-    audio.onended = () => setIsPlayingLine(-1);
-    audio.onerror = () => {
-      console.error('Audio playback error');
+    setCurrentAudio(audio);
+    setIsPlayingLine(lineIndex);
+    
+    audio.onloadeddata = () => {
+      console.log(`🎵 Playing audio for line ${lineIndex}`);
+      audio.play().catch(error => {
+        console.error('Error playing audio:', error);
+        setIsPlayingLine(-1);
+        setCurrentAudio(null);
+      });
+    };
+    
+    audio.onended = () => {
+      console.log(`🎵 Audio finished for line ${lineIndex}`);
       setIsPlayingLine(-1);
+      setCurrentAudio(null);
+    };
+    
+    audio.onerror = (error) => {
+      console.error('Audio error:', error);
+      setIsPlayingLine(-1);
+      setCurrentAudio(null);
     };
 
-    setCurrentAudio(audio);
-    audio.play();
-
-    // Notify parent component
+    // Also call the parent handler for compatibility
     if (onSegmentPlay) {
       onSegmentPlay(audioUrl, lineIndex);
     }
   };
+
+  const handleFullSongPlay = async () => {
+    if (!fullSongPlayer) return;
+
+    if (isPlayingFullSong) {
+      // Stop playback
+      fullSongPlayer.stopPlayback();
+      setIsPlayingFullSong(false);
+      setFullSongProgress({ currentTimeMs: 0, currentSegment: null });
+    } else {
+      // Start playback
+      setIsPlayingFullSong(true);
+      
+      await fullSongPlayer.playFullSong((currentTimeMs, currentSegment) => {
+        setFullSongProgress({ currentTimeMs, currentSegment });
+      });
+      
+      // Reset when done
+      setIsPlayingFullSong(false);
+      setFullSongProgress({ currentTimeMs: 0, currentSegment: null });
+    }
+  };
+
 
   const handleLineStop = () => {
     if (currentAudio) {
@@ -432,6 +602,7 @@ const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
             </motion.div>
           )}
         </AnimatePresence>
+        
       </motion.div>
 
       {/* Lyrics Content */}
@@ -457,7 +628,11 @@ const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, y: -20 }}
                 transition={{ delay: lineIndex * 0.1 }}
-                className="p-3 rounded-lg border border-gray-600 bg-gray-700 hover:bg-gray-650 transition-colors"
+                className={`p-3 rounded-lg border transition-colors ${
+                  fullSongProgress.currentSegment?.lineIndex === lineIndex
+                    ? 'border-green-400 bg-green-900/30 shadow-lg shadow-green-500/20'
+                    : 'border-gray-600 bg-gray-700 hover:bg-gray-650'
+                }`}
               >
                 {/* Full phrase text from CLI - prominently displayed */}
                 <div className="mb-3 p-3 bg-gradient-to-r from-blue-600 to-purple-600 rounded-lg text-white font-semibold">
@@ -476,14 +651,14 @@ const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
                     if (isEditing) {
                       return (
                         <motion.input
-                          key={noteIndex}
+                          key={wordIndex}
                           initial={{ scale: 1.1 }}
                           animate={{ scale: 1 }}
                           type="text"
                           value={editingValue}
                           onChange={(e) => setEditingValue(e.target.value)}
-                          onKeyPress={(e) => handleKeyPress(e, flatNoteIndex)}
-                          onBlur={() => handleEditComplete(flatNoteIndex)}
+                          onKeyPress={(e) => handleKeyPress(e, wordIndex)}
+                          onBlur={() => handleEditComplete(wordIndex)}
                           autoFocus
                           className="px-2 py-1 rounded bg-yellow-500 text-black text-sm font-medium min-w-[40px] focus:outline-none focus:ring-2 focus:ring-yellow-400"
                         />
@@ -565,6 +740,38 @@ const LyricsDisplay: React.FC<LyricsDisplayProps> = ({
                             <span>Play</span>
                           </div>
                         )}
+                      </motion.button>
+                    )}
+                  </div>
+                  <div className="flex gap-2">
+                    <motion.button
+                      whileHover={{ scale: renderingLines.has(lineIndex) ? 1 : 1.1 }}
+                      whileTap={{ scale: renderingLines.has(lineIndex) ? 1 : 0.9 }}
+                      onClick={() => handleLineRender(lineIndex)}
+                      disabled={renderingLines.has(lineIndex)}
+                      className={`px-2 py-1 rounded text-xs transition-colors ${
+                        renderingLines.has(lineIndex)
+                          ? 'bg-yellow-600 text-white cursor-not-allowed animate-pulse'
+                          : 'bg-blue-600 hover:bg-blue-500 text-white'
+                      }`}
+                      title={renderingLines.has(lineIndex) ? "Rendering..." : "Render this line"}
+                    >
+                      {renderingLines.has(lineIndex) ? '⏳ Rendering...' : '🎵 Render'}
+                    </motion.button>
+                    
+                    {renderedAudioUrls.has(lineIndex) && (
+                      <motion.button
+                        whileHover={{ scale: 1.1 }}
+                        whileTap={{ scale: 0.9 }}
+                        onClick={() => handleLinePlay(lineIndex)}
+                        className={`px-2 py-1 rounded text-xs transition-colors ${
+                          isPlayingLine === lineIndex 
+                            ? 'bg-green-600 hover:bg-green-500 text-white animate-pulse' 
+                            : 'bg-gray-600 hover:bg-gray-500 text-white'
+                        }`}
+                        title="Play rendered audio"
+                      >
+                        {isPlayingLine === lineIndex ? '⏸️ Playing' : '▶️ Play'}
                       </motion.button>
                     )}
                   </div>

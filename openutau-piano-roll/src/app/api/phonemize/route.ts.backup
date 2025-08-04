@@ -1,0 +1,131 @@
+import { NextRequest, NextResponse } from 'next/server';
+import { spawn } from 'child_process';
+import { writeFile, unlink, readFile } from 'fs/promises';
+import { join } from 'path';
+import { v4 as uuidv4 } from 'uuid';
+import { USTXData } from '@/types/openutau';
+import { addSPPhonemesToUSTX } from '@/utils/ustxSPPhonemes';
+
+interface PhonemeTimingData {
+  PartName: string;
+  NoteIndex: number;
+  Phoneme: string;
+  TimeMs: number;
+}
+
+export async function POST(request: NextRequest) {
+  try {
+    const { ustxData, singerId } = await request.json();
+    
+    if (!ustxData || !singerId) {
+      return NextResponse.json({ error: 'Missing ustxData or singerId' }, { status: 400 });
+    }
+
+    // Use the OpenUtau directory where voicebanks are located
+    const openUtauDir = '/workspaces/OpenUtau';
+    const tempId = uuidv4();
+    const ustxPath = join(openUtauDir, `${tempId}.ustx`);
+    const outputJson = join(openUtauDir, `${tempId}.json`);
+
+    try {
+      // Add SP phonemes like DiffSinger script does (.Prepend("SP").Append("SP"))
+      const processedUSTX = addSPPhonemesToUSTX(ustxData);
+      
+      console.log(`[PHONEMIZE] Added SP phonemes like DiffSinger script`);
+      
+      // Write processed USTX data to temporary file (exactly like DiffSinger script)
+      await writeFile(ustxPath, JSON.stringify(processedUSTX, null, 2));
+
+      // Build CLI command - exactly like DiffSinger script approach
+      const cliCommand = `rm -rf /home/codespace/.cache/OpenUtau/* && dotnet run --project OpenUtau.Cli -- ${ustxPath} ${singerId} ${outputJson} --reset-timings --preserve-silence-timing`;
+      
+      console.log(`[PHONEMIZE] Running CLI command: ${cliCommand}`);
+
+      // Execute OpenUtau CLI
+      const cliProcess = spawn('bash', ['-c', cliCommand], {
+        cwd: '/workspaces/OpenUtau'
+      });
+
+      // Capture output
+      let stdout = '';
+      let stderr = '';
+      
+      cliProcess.stdout.on('data', (data) => {
+        stdout += data.toString();
+      });
+      
+      cliProcess.stderr.on('data', (data) => {
+        stderr += data.toString();
+      });
+
+      // Wait for process to complete
+      await new Promise<void>((resolve, reject) => {
+        cliProcess.on('close', (code) => {
+          if (code === 0) {
+            resolve();
+          } else {
+            reject(new Error(`CLI exited with code ${code}. stderr: ${stderr}`));
+          }
+        });
+        
+        cliProcess.on('error', reject);
+      });
+
+      // Read the timing data with processed phonemes
+      let timingData: PhonemeTimingData[] = [];
+      try {
+        const jsonData = await readFile(outputJson, 'utf-8');
+        timingData = JSON.parse(jsonData);
+        console.log(`[PHONEMIZE] Successfully processed ${timingData.length} phonemes`);
+        
+        // Debug: Log SP/AP phonemes found
+        const silencePhonemes = timingData.filter(p => 
+          p.Phoneme.toUpperCase() === 'SP' || p.Phoneme.toUpperCase() === 'AP'
+        );
+        console.log(`[PHONEMIZE] Found ${silencePhonemes.length} silence phonemes (SP/AP)`);
+        silencePhonemes.forEach(p => 
+          console.log(`[PHONEMIZE] Silence phoneme: ${p.Phoneme} at ${p.TimeMs}ms (note ${p.NoteIndex})`)
+        );
+        
+      } catch (e) {
+        console.error('[PHONEMIZE] Could not read timing data:', e);
+        throw new Error('Failed to process phoneme timing data');
+      }
+
+      // Clean up temporary files
+      await Promise.all([
+        unlink(ustxPath).catch(() => {}),
+        unlink(outputJson).catch(() => {})
+      ]);
+
+      // Return processed phoneme data
+      return NextResponse.json({
+        success: true,
+        phonemes: timingData,
+        debug: {
+          stdout: stdout.slice(-1000), // Last 1000 chars for debugging
+          stderr: stderr.slice(-1000),
+          totalPhonemes: timingData.length,
+          silencePhonemes: timingData.filter(p => 
+            p.Phoneme.toUpperCase() === 'SP' || p.Phoneme.toUpperCase() === 'AP'
+          ).length
+        }
+      });
+
+    } catch (error) {
+      // Clean up on error
+      await Promise.all([
+        unlink(ustxPath).catch(() => {}),
+        unlink(outputJson).catch(() => {})
+      ]);
+      throw error;
+    }
+
+  } catch (error) {
+    console.error('Phonemize error:', error);
+    return NextResponse.json({ 
+      error: 'Phonemization failed', 
+      details: error instanceof Error ? error.message : 'Unknown error' 
+    }, { status: 500 });
+  }
+}
