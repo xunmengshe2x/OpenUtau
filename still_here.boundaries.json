@@ -1,0 +1,146 @@
+[
+  {
+    "index": 1,
+    "startMs": 444.44444444444446,
+    "endMs": 8000,
+    "phraseCount": 24
+  },
+  {
+    "index": 2,
+    "startMs": 11555.555555555555,
+    "endMs": 19111.11111111111,
+    "phraseCount": 24
+  },
+  {
+    "index": 3,
+    "startMs": 22222.222222222223,
+    "endMs": 29777.777777777777,
+    "phraseCount": 24
+  },
+  {
+    "index": 4,
+    "startMs": 32888.88888888889,
+    "endMs": 40888.88888888889,
+    "phraseCount": 24
+  },
+  {
+    "index": 5,
+    "startMs": 43555.555555555555,
+    "endMs": 48000,
+    "phraseCount": 24
+  },
+  {
+    "index": 6,
+    "startMs": 48888.88888888889,
+    "endMs": 52888.88888888889,
+    "phraseCount": 24
+  },
+  {
+    "index": 7,
+    "startMs": 53000,
+    "endMs": 58222.22222222222,
+    "phraseCount": 24
+  },
+  {
+    "index": 8,
+    "startMs": 58373.148148148146,
+    "endMs": 63555.555555555555,
+    "phraseCount": 24
+  },
+  {
+    "index": 9,
+    "startMs": 63666.666666666664,
+    "endMs": 68888.88888888889,
+    "phraseCount": 24
+  },
+  {
+    "index": 10,
+    "startMs": 69000,
+    "endMs": 74222.22222222222,
+    "phraseCount": 24
+  },
+  {
+    "index": 11,
+    "startMs": 74376.85185185185,
+    "endMs": 78666.66666666667,
+    "phraseCount": 24
+  },
+  {
+    "index": 12,
+    "startMs": 79444.44444444444,
+    "endMs": 82666.66666666667,
+    "phraseCount": 24
+  },
+  {
+    "index": 13,
+    "startMs": 84666.66666666667,
+    "endMs": 88444.44444444444,
+    "phraseCount": 24
+  },
+  {
+    "index": 14,
+    "startMs": 89333.33333333333,
+    "endMs": 94666.66666666667,
+    "phraseCount": 24
+  },
+  {
+    "index": 15,
+    "startMs": 97000,
+    "endMs": 104000,
+    "phraseCount": 24
+  },
+  {
+    "index": 16,
+    "startMs": 104888.88888888889,
+    "endMs": 110222.22222222222,
+    "phraseCount": 24
+  },
+  {
+    "index": 17,
+    "startMs": 110368.51851851853,
+    "endMs": 115111.11111111111,
+    "phraseCount": 24
+  },
+  {
+    "index": 18,
+    "startMs": 117000,
+    "endMs": 122666.66666666667,
+    "phraseCount": 24
+  },
+  {
+    "index": 19,
+    "startMs": 123555.55555555556,
+    "endMs": 127555.55555555556,
+    "phraseCount": 24
+  },
+  {
+    "index": 20,
+    "startMs": 159333.33333333334,
+    "endMs": 163555.55555555556,
+    "phraseCount": 24
+  },
+  {
+    "index": 21,
+    "startMs": 165333.33333333334,
+    "endMs": 173777.77777777778,
+    "phraseCount": 24
+  },
+  {
+    "index": 22,
+    "startMs": 176000,
+    "endMs": 181222.22222222222,
+    "phraseCount": 24
+  },
+  {
+    "index": 23,
+    "startMs": 181333.33333333334,
+    "endMs": 187777.77777777778,
+    "phraseCount": 24
+  },
+  {
+    "index": 24,
+    "startMs": 188000,
+    "endMs": 195555.55555555556,
+    "phraseCount": 24
+  }
+]

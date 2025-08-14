@@ -54,9 +54,58 @@ namespace OpenUtau.Cli {
                     return 1;
                 }
             }
+            if (args.Length >= 1 && args[0].Equals("analyze-verses", StringComparison.OrdinalIgnoreCase)) {
+                if (args.Length < 2) {
+                    Console.WriteLine(
+                        "Usage: dotnet run --project OpenUtau.Cli -- analyze-verses <ustx-file> [--edit-phrase <phrase-num> --new-lyrics \"lyrics\"] [--batch-edit \"phrase1:lyrics1;phrase2:lyrics2\"]");
+                    return 1;
+                }
+                var ustxPath = args[1];
+                if (!File.Exists(ustxPath)) {
+                    Console.Error.WriteLine($"Error: USTX file not found: {ustxPath}");
+                    return 1;
+                }
+                
+                // Check for non-interactive editing modes
+                bool hasEditFlag = false;
+                for (int i = 2; i < args.Length; i++) {
+                    if (args[i].Equals("--edit-phrase", StringComparison.OrdinalIgnoreCase)) {
+                        if (i + 3 < args.Length && args[i + 2].Equals("--new-lyrics", StringComparison.OrdinalIgnoreCase)) {
+                            int phraseNum = int.Parse(args[i + 1]);
+                            string newLyrics = args[i + 3];
+                            Console.WriteLine($"🎵 Editing phrase {phraseNum} with lyrics: \"{newLyrics}\"");
+                            VerseAnalyzerSimple.EditPhrase(ustxPath, phraseNum, newLyrics);
+                            hasEditFlag = true;
+                            break;
+                        } else {
+                            Console.Error.WriteLine("Error: --edit-phrase requires --new-lyrics parameter");
+                            return 1;
+                        }
+                    } else if (args[i].Equals("--batch-edit", StringComparison.OrdinalIgnoreCase)) {
+                        if (i + 1 < args.Length) {
+                            string batchEditString = args[i + 1];
+                            Console.WriteLine($"🎵 Batch editing: {batchEditString}");
+                            VerseAnalyzerSimple.BatchEditPhrases(ustxPath, batchEditString);
+                            hasEditFlag = true;
+                            break;
+                        } else {
+                            Console.Error.WriteLine("Error: --batch-edit requires edit string parameter");
+                            return 1;
+                        }
+                    }
+                }
+                
+                // Only analyze verses for read-only mode (no edit flags)
+                if (!hasEditFlag) {
+                    VerseAnalyzerSimple.AnalyzeVerses(ustxPath);
+                }
+                // Note: No re-analysis after editing since EditPhrase already generates JSON output
+                return 0;
+            }
             if (args.Length < 2) {
                 Console.WriteLine(
                     "Usage: dotnet run --project OpenUtau.Cli -- install <dependency.oudep>\n" +
+                    "       dotnet run --project OpenUtau.Cli -- analyze-verses <ustx-file>\n" +
                     "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> [output.json] [output.wav]\n" +
                     "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> <output.wav>\n" +
                     "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> [output.json] [output.wav] --reset-timings\n" +
@@ -65,7 +114,9 @@ namespace OpenUtau.Cli {
                     "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> <output.ds> --diffsinger [--no-pitch]\n" +
                     "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> <phrases.json> --phrases-only\n" +
                     "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> [output.json] [output.wav] --render-phrases 1,2,5\n" +
-                    "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> [output.json] [output.wav] --render-phrases 2 --trim-leading-silence");
+                    "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> [output.json] [output.wav] --render-phrases 2 --trim-leading-silence\n" +
+                    "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> output.wav --diffsinger-depth 1.0 --diffsinger-steps 20\n" +
+                    "       dotnet run --project OpenUtau.Cli -- <ustx-file> <singer-id> output.ds --diffsinger --diffsinger-steps-pitch 10 --diffsinger-steps-variance 20");
                 return 1;
             }
             var inputPath = args[0]; // Can be USTX or DS file
@@ -80,6 +131,10 @@ namespace OpenUtau.Cli {
             bool phrasesOnly = false;
             bool trimLeadingSilence = false;
             var renderPhraseIndices = new List<int>();
+            double? diffSingerDepth = null;
+            int? diffSingerSteps = null;
+            int? diffSingerStepsPitch = null;
+            int? diffSingerStepsVariance = null;
             
             // Detect input file type
             var inputExtension = Path.GetExtension(inputPath).ToLowerInvariant();
@@ -101,6 +156,38 @@ namespace OpenUtau.Cli {
                     phrasesOnly = true;
                 } else if (arg.Equals("--trim-leading-silence", StringComparison.OrdinalIgnoreCase)) {
                     trimLeadingSilence = true;
+                } else if (arg.StartsWith("--diffsinger-depth", StringComparison.OrdinalIgnoreCase)) {
+                    if (i + 1 < args.Length && double.TryParse(args[i + 1], out double depth)) {
+                        diffSingerDepth = depth;
+                        Console.Error.WriteLine($"[DEBUG] DiffSinger depth set to: {depth}");
+                        i++;
+                    } else {
+                        Console.Error.WriteLine("[WARNING] --diffsinger-depth requires a numeric value");
+                    }
+                } else if (arg.StartsWith("--diffsinger-steps", StringComparison.OrdinalIgnoreCase) && !arg.Contains("-pitch") && !arg.Contains("-variance")) {
+                    if (i + 1 < args.Length && int.TryParse(args[i + 1], out int steps)) {
+                        diffSingerSteps = steps;
+                        Console.Error.WriteLine($"[DEBUG] DiffSinger steps set to: {steps}");
+                        i++;
+                    } else {
+                        Console.Error.WriteLine("[WARNING] --diffsinger-steps requires an integer value");
+                    }
+                } else if (arg.StartsWith("--diffsinger-steps-pitch", StringComparison.OrdinalIgnoreCase)) {
+                    if (i + 1 < args.Length && int.TryParse(args[i + 1], out int steps)) {
+                        diffSingerStepsPitch = steps;
+                        Console.Error.WriteLine($"[DEBUG] DiffSinger pitch steps set to: {steps}");
+                        i++;
+                    } else {
+                        Console.Error.WriteLine("[WARNING] --diffsinger-steps-pitch requires an integer value");
+                    }
+                } else if (arg.StartsWith("--diffsinger-steps-variance", StringComparison.OrdinalIgnoreCase)) {
+                    if (i + 1 < args.Length && int.TryParse(args[i + 1], out int steps)) {
+                        diffSingerStepsVariance = steps;
+                        Console.Error.WriteLine($"[DEBUG] DiffSinger variance steps set to: {steps}");
+                        i++;
+                    } else {
+                        Console.Error.WriteLine("[WARNING] --diffsinger-steps-variance requires an integer value");
+                    }
                 } else if (arg.StartsWith("--render-phrases", StringComparison.OrdinalIgnoreCase)) {
                     if (i + 1 < args.Length) {
                         var phrasesSpec = args[i + 1];
@@ -273,11 +360,33 @@ namespace OpenUtau.Cli {
             Console.Error.WriteLine($"[DEBUG]   CurrentDirectory: {Environment.CurrentDirectory}");
             Console.Error.WriteLine($"[DEBUG]   Audio system available: {System.Runtime.InteropServices.RuntimeInformation.IsOSPlatform(System.Runtime.InteropServices.OSPlatform.Linux)}");
             
+            // Apply DiffSinger settings if provided
+            if (diffSingerDepth.HasValue) {
+                OpenUtau.Core.Util.Preferences.Default.DiffSingerDepth = diffSingerDepth.Value;
+                Console.Error.WriteLine($"[DEBUG] Applied DiffSinger depth: {diffSingerDepth.Value}");
+            }
+            if (diffSingerSteps.HasValue) {
+                OpenUtau.Core.Util.Preferences.Default.DiffSingerSteps = diffSingerSteps.Value;
+                Console.Error.WriteLine($"[DEBUG] Applied DiffSinger steps: {diffSingerSteps.Value}");
+            }
+            if (diffSingerStepsPitch.HasValue) {
+                OpenUtau.Core.Util.Preferences.Default.DiffSingerStepsPitch = diffSingerStepsPitch.Value;
+                Console.Error.WriteLine($"[DEBUG] Applied DiffSinger pitch steps: {diffSingerStepsPitch.Value}");
+            }
+            if (diffSingerStepsVariance.HasValue) {
+                OpenUtau.Core.Util.Preferences.Default.DiffSingerStepsVariance = diffSingerStepsVariance.Value;
+                Console.Error.WriteLine($"[DEBUG] Applied DiffSinger variance steps: {diffSingerStepsVariance.Value}");
+            }
+            
             // Check ONNX Runtime configuration for DiffSinger
             Console.Error.WriteLine($"[DEBUG] ONNX Runtime Environment:");
             Console.Error.WriteLine($"[DEBUG]   Available ONNX runners: {string.Join(", ", OpenUtau.Core.Onnx.getRunnerOptions())}");
             Console.Error.WriteLine($"[DEBUG]   Current ONNX runner setting: {OpenUtau.Core.Util.Preferences.Default.OnnxRunner ?? "null (will default to CPU)"}");
             Console.Error.WriteLine($"[DEBUG]   ONNX GPU setting: {OpenUtau.Core.Util.Preferences.Default.OnnxGpu}");
+            Console.Error.WriteLine($"[DEBUG]   DiffSinger depth: {OpenUtau.Core.Util.Preferences.Default.DiffSingerDepth}");
+            Console.Error.WriteLine($"[DEBUG]   DiffSinger steps: {OpenUtau.Core.Util.Preferences.Default.DiffSingerSteps}");
+            Console.Error.WriteLine($"[DEBUG]   DiffSinger pitch steps: {OpenUtau.Core.Util.Preferences.Default.DiffSingerStepsPitch}");
+            Console.Error.WriteLine($"[DEBUG]   DiffSinger variance steps: {OpenUtau.Core.Util.Preferences.Default.DiffSingerStepsVariance}");
             
             // Check if DiffSinger model files exist
             var singerPath = singer.Location;

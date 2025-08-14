@@ -340,3 +340,43 @@ appcast.*.xml
 *.tar.gz
 .vscode/
 Microsoft.AI.DirectML
+
+# Model files
+*.onnx
+*.7z
+fem_1_ln/
+fem1_lynxnet.*/
+pc_nsf_hifigan*.oudep
+
+# Audio files
+*.wav
+*.ds
+output.*
+
+# Temporary USTX files
+still_here_edited_*.ustx
+still_here_edited_*.boundaries.json
+still_here_updated*.ustx
+happybirthday.ustx
+chatbased.ustx
+
+# Cache and temp directories
+.segment_cache/
+dsdur/
+dspitch/
+
+# Debug and test files
+*_debug.json
+*_test.json
+test_*.json
+debug_*.py
+analyze_*.py
+check_*.py
+create-verse-templates.*
+
+# Misc large files
+dictionary.txt
+character.txt
+mm0m
+mist22.json
+
